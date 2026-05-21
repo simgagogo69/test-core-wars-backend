@@ -213,6 +213,7 @@ const VEHICLE_DEFS = {
     // ── ROE ───────────────────────────────────────────────────────────────────
     'roe_breaker': {
         name: 'Breaker SPG', hp: 600, maxHp: 600, spd: 110, r: 54,
+        turnRate: 1.8,   // radians per second — heavy SPG turns slowly
         spawnCost: 70,
         // Hull MG (driver)
         driverFireRate : 450, driverDmg: 10, driverProjSpd: 620, driverProjR: 4,
@@ -222,6 +223,7 @@ const VEHICLE_DEFS = {
     },
     'roe_suppressor': {
         name: 'Suppressor Carrier', hp: 420, maxHp: 420, spd: 155, r: 48,
+        turnRate: 2.5,   // lighter APC turns faster
         spawnCost: 50,
         // Single forward MG (driver)
         driverFireRate : 220, driverDmg: 7, driverProjSpd: 660, driverProjR: 4,
@@ -779,9 +781,23 @@ class Room {
 
             // ── Move vehicle (driver controls) ────────────────────────────────
             if (driver) {
-                const spd  = vDef.spd;
-                let nvx = veh.x + driver.inp.dx * spd * dt;
-                let nvy = veh.y + driver.inp.dy * spd * dt;
+                const spd      = vDef.spd;
+                const turnRate = vDef.turnRate || 2.2;
+
+                // Tank-style steering: project WASD world-space input onto vehicle axes.
+                // Forward/back (W/S) throttles along the current heading.
+                // Side (A/D) steers (rotates heading).
+                const fwdX  = Math.cos(veh.a), fwdY  = Math.sin(veh.a);
+                const sideX = Math.cos(veh.a + Math.PI / 2), sideY = Math.sin(veh.a + Math.PI / 2);
+                const throttle = driver.inp.dx * fwdX  + driver.inp.dy * fwdY;
+                const steer    = driver.inp.dx * sideX + driver.inp.dy * sideY;
+
+                // Rotate heading smoothly
+                veh.a += steer * turnRate * dt;
+
+                // Move along (updated) heading
+                let nvx = veh.x + Math.cos(veh.a) * throttle * spd * dt;
+                let nvy = veh.y + Math.sin(veh.a) * throttle * spd * dt;
 
                 // Map bounds
                 nvx = clamp(nvx, veh.r, MAP_W - veh.r);
@@ -804,12 +820,6 @@ class Room {
                     const mid = MAP_W / 2;
                     if (veh.team === 0) nvx = Math.min(nvx, mid - veh.r);
                     else               nvx = Math.max(nvx, mid + veh.r);
-                }
-
-                // Update vehicle heading from movement direction
-                const moveDx = nvx - veh.x, moveDy = nvy - veh.y;
-                if (Math.hypot(moveDx, moveDy) > 0.5) {
-                    veh.a = Math.atan2(moveDy, moveDx);
                 }
 
                 veh.x = nvx; veh.y = nvy;
