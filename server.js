@@ -212,7 +212,7 @@ const WALL_UPGRADE_PATHS = {
 const VEHICLE_DEFS = {
     // ── ROE ───────────────────────────────────────────────────────────────────
     'roe_breaker': {
-        name: 'Breaker SPG', hp: 600, maxHp: 600, spd: 110, r: 32,
+        name: 'Breaker SPG', hp: 600, maxHp: 600, spd: 110, r: 54,
         spawnCost: 70,
         // Hull MG (driver)
         driverFireRate : 450, driverDmg: 10, driverProjSpd: 620, driverProjR: 4,
@@ -221,7 +221,7 @@ const VEHICLE_DEFS = {
         passengerProjR: 13, passengerSplash: 130,
     },
     'roe_suppressor': {
-        name: 'Suppressor Carrier', hp: 420, maxHp: 420, spd: 155, r: 28,
+        name: 'Suppressor Carrier', hp: 420, maxHp: 420, spd: 155, r: 48,
         spawnCost: 50,
         // Single forward MG (driver)
         driverFireRate : 220, driverDmg: 7, driverProjSpd: 660, driverProjR: 4,
@@ -1452,7 +1452,7 @@ class Room {
         if (!vid || player.vehicleId || player.rt > 0) return;
         const veh = this.vehicles.get(vid);
         if (!veh || veh.team !== player.team) return;
-        if (dist(player.x, player.y, veh.x, veh.y) > 90) return;
+        if (dist(player.x, player.y, veh.x, veh.y) > 140) return;
 
         if (!veh.driverId) {
             veh.driverId       = player.id;
@@ -1472,8 +1472,8 @@ class Room {
             if (veh.driverId    === player.id) veh.driverId    = null;
             if (veh.passengerId === player.id) veh.passengerId = null;
             // Eject slightly to the side
-            player.x = clamp(veh.x + (player.team === 0 ? -45 : 45), player.r, MAP_W - player.r);
-            player.y = clamp(veh.y + 20, player.r, MAP_H - player.r);
+            player.x = clamp(veh.x + (player.team === 0 ? -70 : 70), player.r, MAP_W - player.r);
+            player.y = clamp(veh.y + 30, player.r, MAP_H - player.r);
         }
         player.vehicleId   = null;
         player.vehicleRole = null;
