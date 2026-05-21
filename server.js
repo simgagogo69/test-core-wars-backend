@@ -213,6 +213,7 @@ const VEHICLE_DEFS = {
     // ── ROE ───────────────────────────────────────────────────────────────────
     'roe_breaker': {
         name: 'Breaker SPG', hp: 600, maxHp: 600, spd: 110, r: 32,
+        spawnCost: 70,
         // Hull MG (driver)
         driverFireRate : 450, driverDmg: 10, driverProjSpd: 620, driverProjR: 4,
         // Siege cannon (passenger)
@@ -221,6 +222,7 @@ const VEHICLE_DEFS = {
     },
     'roe_suppressor': {
         name: 'Suppressor Carrier', hp: 420, maxHp: 420, spd: 155, r: 28,
+        spawnCost: 50,
         // Single forward MG (driver)
         driverFireRate : 220, driverDmg: 7, driverProjSpd: 660, driverProjR: 4,
         // Twin rotary cannons (passenger) — high fire rate, slows enemies
@@ -1009,8 +1011,9 @@ class Room {
                     for (const [bid, b] of this.buildings) {
                         if (b.team === p.team) continue;
                         const hit =
-                            (b.type === 'w' && circleRect(p.x, p.y, p.r, b.x-WALL_HALF, b.y-WALL_HALF, WALL_W, WALL_W)) ||
-                            (b.type === 't' && dist(p.x, p.y, b.x, b.y) < b.r + p.r);
+                            (b.type === 'w'  && circleRect(p.x, p.y, p.r, b.x-WALL_HALF, b.y-WALL_HALF, WALL_W, WALL_W)) ||
+                            (b.type === 't'  && dist(p.x, p.y, b.x, b.y) < b.r + p.r) ||
+                            (b.type === 'vd' && dist(p.x, p.y, b.x, b.y) < b.r + p.r);
                         if (hit) {
                             const dmg = p.bonusVsBldg ? Math.round(p.dmg * 1.5) : p.dmg;
                             // Citadel buff: temporarily lower incoming damage by 15%
@@ -1234,11 +1237,11 @@ class Room {
 
         const faction = FACTIONS[this.teamFactions[player.team]] || FACTIONS['roe'];
 
-        // ── Vehicle depot ─────────────────────────────────────────────────────
+        // ── Vehicle depot — place the building itself ──────────────────────────
         if (req.bt === 'vd') {
-            const vType = req.vt;
+            // Only factions with vehicles can build a depot
             const factionVehicles = FACTION_VEHICLES[this.teamFactions[player.team]] || [];
-            if (!factionVehicles.includes(vType)) return;
+            if (factionVehicles.length === 0) return;
             if (player.res < VEHICLE_DEPOT_COST) return;
 
             const mid    = MAP_W / 2;
@@ -1247,20 +1250,24 @@ class Room {
             if ((player.team === 0 && !onRed) || (player.team === 1 && !onBlue)) return;
             if (this.isOnWater(req.x, req.y, 40)) return;
 
-            const vDef = VEHICLE_DEFS[vType];
-            if (!vDef) return;
+            const core = this.cores[player.team];
+            if (dist(req.x, req.y, core.x, core.y) < 150) return;
 
-            const vid = shortId();
-            const veh = {
-                id: vid, type: vType, team: player.team,
-                x: req.x, y: req.y, a: 0, pa: 0,
-                hp: vDef.maxHp, maxHp: vDef.maxHp, r: vDef.r,
-                driverId: null, passengerId: null,
-                lastDriverShot: 0, lastPassengerShot: 0,
+            // One depot per team — don't allow duplicates
+            for (const eb of this.buildings.values()) {
+                if (eb.type === 'vd' && eb.team === player.team) return;
+            }
+
+            const id = shortId();
+            const b  = {
+                id, type: 'vd', subtype: 'vd', team: player.team,
+                x: req.x, y: req.y,
+                hp: 500, maxHp: 500,
+                r: 36,
             };
-            this.vehicles.set(vid, veh);
+            this.buildings.set(id, b);
             player.res -= VEHICLE_DEPOT_COST;
-            this.events.push({ e: EV.VEHICLE_SPAWN, veh: wireVehicle(veh) });
+            this.events.push({ e: EV.BUILD_ADD, b: wireBuild(b) });
             this.events.push({ e: EV.RES_CHANGE, i: player.id, r: player.res });
             return;
         }
@@ -1396,6 +1403,48 @@ class Room {
         b.damageShare    = def.damageShare    || false;
 
         this.events.push({ e: EV.WALL_UPGRADE, i: b.id, st: b.subtype, hp: b.hp, mhp: b.maxHp });
+        this.events.push({ e: EV.RES_CHANGE, i: player.id, r: player.res });
+    }
+
+    handleVehicleSpawn(player, vType) {
+        if (!vType) return;
+        if (player.rt > 0) return;
+
+        // Validate faction can use this vehicle
+        const factionVehicles = FACTION_VEHICLES[this.teamFactions[player.team]] || [];
+        if (!factionVehicles.includes(vType)) return;
+
+        const vDef = VEHICLE_DEFS[vType];
+        if (!vDef) return;
+
+        // Find a friendly depot the player is near
+        let depot = null;
+        for (const b of this.buildings.values()) {
+            if (b.type === 'vd' && b.team === player.team) {
+                if (dist(player.x, player.y, b.x, b.y) <= 120) { depot = b; break; }
+            }
+        }
+        if (!depot) return;
+
+        const spawnCost = vDef.spawnCost || 60;
+        if (player.res < spawnCost) return;
+
+        // Spawn vehicle just outside the depot
+        const spawnOff = depot.r + vDef.r + 12;
+        const spawnX   = clamp(depot.x + (player.team === 0 ? -spawnOff : spawnOff), vDef.r, MAP_W - vDef.r);
+        const spawnY   = clamp(depot.y, vDef.r, MAP_H - vDef.r);
+
+        const vid = shortId();
+        const veh = {
+            id: vid, type: vType, team: player.team,
+            x: spawnX, y: spawnY, a: 0, pa: 0,
+            hp: vDef.maxHp, maxHp: vDef.maxHp, r: vDef.r,
+            driverId: null, passengerId: null,
+            lastDriverShot: 0, lastPassengerShot: 0,
+        };
+        this.vehicles.set(vid, veh);
+        player.res -= spawnCost;
+        this.events.push({ e: EV.VEHICLE_SPAWN, veh: wireVehicle(veh) });
         this.events.push({ e: EV.RES_CHANGE, i: player.id, r: player.res });
     }
 
@@ -1581,6 +1630,10 @@ wss.on('connection', (ws) => {
             } else if (data.t === 'wupg' && room) {
                 const player = room.players.get(id);
                 if (player) room.handleWallUpgrade(player, data);
+
+            } else if (data.t === 'vspawn' && room) {
+                const player = room.players.get(id);
+                if (player) room.handleVehicleSpawn(player, data.vt);
 
             } else if (data.t === 'venter' && room) {
                 const player = room.players.get(id);
