@@ -109,6 +109,7 @@ const EV = {
     WALL_UPGRADE   : 15,   // wall upgraded to new subtype
     VEHICLE_SPAWN  : 16,   // vehicle placed/spawned
     VEHICLE_DESTROY: 17,   // vehicle destroyed
+    VEH_BRACE      : 18,   // Knox Guardian brace activated
 };
 
 // ─── Turret upgrade tree ──────────────────────────────────────────────────────
@@ -231,19 +232,37 @@ const VEHICLE_DEFS = {
         passengerFireRate: 140, passengerDmg: 5, passengerProjSpd: 540,
         passengerProjR: 5, passengerSlow: true,
     },
-    // ── BGM Corp — vehicles coming soon ──────────────────────────────────────
-    // 'bgm_heavy':   { ... },
-    // 'bgm_crawler': { ... },
-    // ── EPA — vehicles coming soon ────────────────────────────────────────────
-    // 'epa_striker': { ... },
-    // 'epa_bastion': { ... },
+    // ── EPA ───────────────────────────────────────────────────────────────────
+    'epa_citadel_interceptor': {
+        name: 'Citadel Interceptor', hp: 480, maxHp: 480, spd: 130, r: 50,
+        turnRate: 2.2, spawnCost: 65,
+        // Driver: precision tracking burst — short-range intercept shots
+        driverFireRate: 300, driverDmg: 6, driverProjSpd: 700, driverProjR: 4,
+        driverIntercept: true,          // driver shots destroy nearby enemy projectiles on impact
+        // Passenger: Citadel Array — automated intercept dome (same mechanic as epa_citadel turret)
+        passengerFireRate: 220, passengerDmg: 8, passengerProjSpd: 680, passengerProjR: 5,
+        passengerIntercept: 0.55,       // chance per frame to destroy enemy projs in radius
+        passengerInterceptR: 160,       // radius of the intercept dome
+    },
+    'epa_knox_guardian': {
+        name: 'Knox Guardian', hp: 900, maxHp: 900, spd: 72, r: 60,
+        turnRate: 0.9, spawnCost: 90,
+        // Driver: segmented shield emitters — creates a directional barrier burst
+        driverFireRate: 2200, driverDmg: 0, driverProjSpd: 0, driverProjR: 0,
+        driverBrace: true,              // activates brace: reduce incoming dmg + buff nearby friendly buildings
+        braceRadius: 240, braceDmgReduce: 0.45, braceBuildHeal: 4, braceDuration: 2500,
+        // Passenger: heavy directional energy barrier cannon (main gun)
+        passengerFireRate: 1800, passengerDmg: 65, passengerProjSpd: 320,
+        passengerProjR: 14, passengerSplash: 80,
+        passengerPierce: true,          // barrier bolt pushes through multiple targets
+    },
 };
 
 // Map faction → available vehicle types (empty = no vehicles yet)
 const FACTION_VEHICLES = {
     'roe': ['roe_breaker', 'roe_suppressor'],
     'bgm': [],   // coming soon
-    'epa': [],   // coming soon
+    'epa': ['epa_citadel_interceptor', 'epa_knox_guardian'],
 };
 
 // Vehicle depot build cost
@@ -620,6 +639,7 @@ class Room {
         this._prevPhase   = -1;
         this._prevTimer   = -1;
         this._prevCoreHPs = [-1, -1];
+        this._lastScrapTick = null;
 
         for (const p of this.players.values()) {
             p.res = 150;
@@ -771,6 +791,21 @@ class Room {
             }
         }
 
+        // ── Passive scrap income during attack phase (4 scrap/sec, synced to client) ──
+        if (this.phase === PH.ATTACK) {
+            if (!this._lastScrapTick) this._lastScrapTick = now;
+            const scrapElapsed = now - this._lastScrapTick;
+            if (scrapElapsed >= 1000) {
+                const gain = Math.round(4 * (scrapElapsed / 1000));
+                this._lastScrapTick = now;
+                for (const p of this.players.values()) {
+                    if (p.rt > 0) continue;
+                    p.res += gain;
+                    this.events.push({ e: EV.RES_CHANGE, i: p.id, r: p.res });
+                }
+            }
+        }
+
         // ── Vehicle tick: movement, weapons, occupant positioning ─────────────────
         for (const [vid, veh] of this.vehicles) {
             const vDef = VEHICLE_DEFS[veh.type];
@@ -824,21 +859,56 @@ class Room {
 
                 veh.x = nvx; veh.y = nvy;
 
-                // ── Driver weapon (hull MG) ────────────────────────────────────
+                // ── Driver weapon (hull MG / special) ────────────────────────
                 if (this.phase === PH.ATTACK && driver.inp.sh && now - veh.lastDriverShot > vDef.driverFireRate) {
                     veh.lastDriverShot = now;
-                    this.spawnProjectile(veh.x, veh.y, driver.a, veh.team, driver.id, {
-                        spd: vDef.driverProjSpd, dmg: vDef.driverDmg,
-                        r: vDef.driverProjR || 4, life: 2.0,
-                        slow: vDef.driverSlow || false,
-                        pt: veh.type + '_drv',
-                    });
+
+                    // Knox Guardian — driver braces instead of shooting
+                    if (vDef.driverBrace) {
+                        veh.braceUntil = now + vDef.braceDuration;
+                        this.events.push({ e: EV.VEH_BRACE, i: veh.id, until: veh.braceUntil });
+                        // Heal nearby friendly buildings
+                        for (const b of this.buildings.values()) {
+                            if (b.team !== veh.team) continue;
+                            if (dist(veh.x, veh.y, b.x, b.y) <= vDef.braceRadius) {
+                                const heal = Math.min(b.maxHp - b.hp, vDef.braceBuildHeal);
+                                if (heal > 0) {
+                                    b.hp += heal;
+                                    this.events.push({ e: EV.BUILD_HIT, i: b.id, hp: b.hp });
+                                }
+                            }
+                        }
+                    } else {
+                        // Normal driver shot
+                        this.spawnProjectile(veh.x, veh.y, driver.a, veh.team, driver.id, {
+                            spd: vDef.driverProjSpd, dmg: vDef.driverDmg,
+                            r: vDef.driverProjR || 4, life: 2.0,
+                            slow: vDef.driverSlow || false,
+                            intercept: vDef.driverIntercept || false,
+                            pt: veh.type + '_drv',
+                        });
+                    }
                 }
             }
 
             // Track passenger aim angle (for client cannon rendering)
             if (passenger) {
                 veh.pa = passenger.a;
+
+                // ── Citadel Interceptor: passive intercept dome (always on) ───
+                if (vDef.passengerIntercept && this.phase === PH.ATTACK) {
+                    const intR   = vDef.passengerInterceptR || 160;
+                    const chance = vDef.passengerIntercept;
+                    for (const [pid, p] of this.projs) {
+                        if (p.team === veh.team) continue;
+                        if (dist(veh.x, veh.y, p.x, p.y) < intR) {
+                            if (Math.random() < chance * dt) {   // dt-scaled so rate is frame-independent
+                                this.projs.delete(pid);
+                                this.events.push({ e: EV.PROJ_DESTROY, i: pid });
+                            }
+                        }
+                    }
+                }
 
                 // ── Passenger weapon (main gun) ────────────────────────────────
                 if (this.phase === PH.ATTACK && passenger.inp.sh && now - veh.lastPassengerShot > vDef.passengerFireRate) {
@@ -848,6 +918,7 @@ class Room {
                         r: vDef.passengerProjR || 8, life: 2.5,
                         splash: vDef.passengerSplash || 0,
                         slow: vDef.passengerSlow || false,
+                        pierce: vDef.passengerPierce || false,
                         pt: veh.type + '_pax',
                     });
                 }
@@ -1014,6 +1085,16 @@ class Room {
                         } else {
                             this.events.push({ e: EV.PLAYER_HIT, i: target.id, hp: target.hp, pt: p.pt });
                         }
+                        // Intercept shots also destroy nearby enemy projectiles on impact
+                        if (p.intercept) {
+                            for (const [epid, ep] of this.projs) {
+                                if (ep.team === p.team) continue;
+                                if (dist(p.x, p.y, ep.x, ep.y) < 80) {
+                                    this.projs.delete(epid);
+                                    this.events.push({ e: EV.PROJ_DESTROY, i: epid });
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -1071,8 +1152,12 @@ class Room {
                     for (const [vid, v] of this.vehicles) {
                         if (v.team === p.team) continue;
                         if (dist(p.x, p.y, v.x, v.y) < v.r + p.r) {
-                            v.hp -= p.dmg;
-                            dead = true; hitSomething = true;
+                            const vDef2 = VEHICLE_DEFS[v.type] || {};
+                            const bracing = vDef2.driverBrace && v.braceUntil && now < v.braceUntil;
+                            const actualDmg = bracing ? Math.round(p.dmg * (1 - (vDef2.braceDmgReduce || 0))) : p.dmg;
+                            v.hp -= actualDmg;
+                            if (!p.pierce) { dead = true; }
+                            hitSomething = true;
                             if (v.hp <= 0) {
                                 // Eject occupants at vehicle position
                                 for (const oid of [v.driverId, v.passengerId]) {
