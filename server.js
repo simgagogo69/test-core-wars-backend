@@ -232,7 +232,46 @@ const VEHICLE_DEFS = {
         passengerFireRate: 140, passengerDmg: 5, passengerProjSpd: 540,
         passengerProjR: 5, passengerSlow: true,
     },
-    // ── EPA ───────────────────────────────────────────────────────────────────
+    // ── BGM Corp ──────────────────────────────────────────────────────────────
+    'bgm_prospector': {
+        name: 'BGM-4 Prospector', hp: 380, maxHp: 380, spd: 145, r: 34,
+        turnRate: 0, spawnCost: 55,
+        isMech: true, singlePilot: true,
+        // Main weapon: Thermal Rivet Gun (driver shoots on aim)
+        driverFireRate: 420, driverDmg: 18, driverProjSpd: 520, driverProjR: 5,
+        driverBurnChance: 0.25,   // 25% chance to apply burn on hit
+        // MK-A Utility Drone — light auto MG
+        drone: 'mk_a',
+        droneFireRate: 600, droneDmg: 5, droneProjSpd: 580, droneProjR: 3,
+        droneRange: 280, droneOrbitR: 52, droneOrbitSpd: 1.6,
+    },
+    'bgm_tunnelrat': {
+        name: 'BGM-7 Tunnelrat', hp: 320, maxHp: 320, spd: 175, r: 32,
+        turnRate: 0, spawnCost: 48,
+        isMech: true, singlePilot: true,
+        // Main weapon: Rotary Cutter — short-range high-damage, falloff at range
+        driverFireRate: 110, driverDmg: 9, driverProjSpd: 380, driverProjR: 6,
+        driverMaxRange: 200,      // effective range; life capped to reach this
+        driverBonusVsWall: 2.2,   // massive bonus vs walls
+        // MK-A Utility Drone
+        drone: 'mk_a',
+        droneFireRate: 600, droneDmg: 5, droneProjSpd: 580, droneProjR: 3,
+        droneRange: 280, droneOrbitR: 48, droneOrbitSpd: 2.0,
+    },
+    'bgm_hauler': {
+        name: 'BGM-12 Hauler Frame', hp: 680, maxHp: 680, spd: 100, r: 52,
+        turnRate: 0, spawnCost: 80,
+        isMech: true, singlePilot: false,
+        // Driver: hull MG
+        driverFireRate: 300, driverDmg: 8, driverProjSpd: 640, driverProjR: 4,
+        // Passenger: Mag Loader Cannon
+        passengerFireRate: 2200, passengerDmg: 72, passengerProjSpd: 400,
+        passengerProjR: 11, passengerSplash: 90,
+        // MK-B Escort Drone — larger, better tracking
+        drone: 'mk_b',
+        droneFireRate: 380, droneDmg: 8, droneProjSpd: 620, droneProjR: 4,
+        droneRange: 340, droneOrbitR: 68, droneOrbitSpd: 1.3,
+    },
     'epa_citadel_interceptor': {
         name: 'Citadel Interceptor', hp: 480, maxHp: 480, spd: 130, r: 50,
         turnRate: 2.2, spawnCost: 65,
@@ -261,7 +300,7 @@ const VEHICLE_DEFS = {
 // Map faction → available vehicle types (empty = no vehicles yet)
 const FACTION_VEHICLES = {
     'roe': ['roe_breaker', 'roe_suppressor'],
-    'bgm': [],   // coming soon
+    'bgm': ['bgm_prospector', 'bgm_tunnelrat', 'bgm_hauler'],
     'epa': ['epa_citadel_interceptor', 'epa_knox_guardian'],
 };
 
@@ -312,6 +351,10 @@ function wireVehicle(v) {
         hp: Math.round(v.hp), mhp: v.maxHp,
         drv: v.driverId  || null,
         pax: v.passengerId || null,
+        // Drone fields (mechs only)
+        dx: v.droneX !== undefined ? Math.round(v.droneX) : undefined,
+        dy: v.droneY !== undefined ? Math.round(v.droneY) : undefined,
+        da: v.droneA !== undefined ? encodeAngle(v.droneA) : undefined,
     };
 }
 
@@ -817,22 +860,25 @@ class Room {
             // ── Move vehicle (driver controls) ────────────────────────────────
             if (driver) {
                 const spd      = vDef.spd;
-                const turnRate = vDef.turnRate || 2.2;
 
-                // Tank-style steering: project WASD world-space input onto vehicle axes.
-                // Forward/back (W/S) throttles along the current heading.
-                // Side (A/D) steers (rotates heading).
-                const fwdX  = Math.cos(veh.a), fwdY  = Math.sin(veh.a);
-                const sideX = Math.cos(veh.a + Math.PI / 2), sideY = Math.sin(veh.a + Math.PI / 2);
-                const throttle = driver.inp.dx * fwdX  + driver.inp.dy * fwdY;
-                const steer    = driver.inp.dx * sideX + driver.inp.dy * sideY;
+                let nvx, nvy;
 
-                // Rotate heading smoothly
-                veh.a += steer * turnRate * dt;
-
-                // Move along (updated) heading
-                let nvx = veh.x + Math.cos(veh.a) * throttle * spd * dt;
-                let nvy = veh.y + Math.sin(veh.a) * throttle * spd * dt;
+                if (vDef.isMech) {
+                    // ── Biped movement: world-space WASD strafe, heading = driver aim ──
+                    nvx = veh.x + driver.inp.dx * spd * dt;
+                    nvy = veh.y + driver.inp.dy * spd * dt;
+                    veh.a = driver.a;   // mech body faces where player aims
+                } else {
+                    // ── Tank-style steering ────────────────────────────────────
+                    const turnRate = vDef.turnRate || 2.2;
+                    const fwdX  = Math.cos(veh.a), fwdY  = Math.sin(veh.a);
+                    const sideX = Math.cos(veh.a + Math.PI / 2), sideY = Math.sin(veh.a + Math.PI / 2);
+                    const throttle = driver.inp.dx * fwdX  + driver.inp.dy * fwdY;
+                    const steer    = driver.inp.dx * sideX + driver.inp.dy * sideY;
+                    veh.a += steer * turnRate * dt;
+                    nvx = veh.x + Math.cos(veh.a) * throttle * spd * dt;
+                    nvy = veh.y + Math.sin(veh.a) * throttle * spd * dt;
+                }
 
                 // Map bounds
                 nvx = clamp(nvx, veh.r, MAP_W - veh.r);
@@ -879,13 +925,45 @@ class Room {
                             }
                         }
                     } else {
-                        // Normal driver shot
+                        // Normal driver shot (includes mech main weapon)
+                        const projLife = vDef.driverMaxRange
+                            ? (vDef.driverMaxRange / (vDef.driverProjSpd || 500))
+                            : 2.0;
                         this.spawnProjectile(veh.x, veh.y, driver.a, veh.team, driver.id, {
                             spd: vDef.driverProjSpd, dmg: vDef.driverDmg,
-                            r: vDef.driverProjR || 4, life: 2.0,
+                            r: vDef.driverProjR || 4, life: projLife,
                             slow: vDef.driverSlow || false,
                             intercept: vDef.driverIntercept || false,
+                            burn: vDef.driverBurnChance && Math.random() < vDef.driverBurnChance,
+                            bonusVsWall: vDef.driverBonusVsWall || 0,
                             pt: veh.type + '_drv',
+                        });
+                    }
+                }
+            }
+
+            // ── Automatic drone tick ───────────────────────────────────────────
+            if (vDef.drone && this.phase === PH.ATTACK) {
+                const orbitR   = vDef.droneOrbitR   || 52;
+                const orbitSpd = vDef.droneOrbitSpd || 1.6;
+                const dRange   = vDef.droneRange     || 280;
+
+                // Orbit angle advances continuously
+                veh.droneOrbitAngle = ((veh.droneOrbitAngle || 0) + orbitSpd * dt) % (Math.PI * 2);
+                veh.droneX = veh.x + Math.cos(veh.droneOrbitAngle) * orbitR;
+                veh.droneY = veh.y + Math.sin(veh.droneOrbitAngle) * orbitR;
+
+                // Auto-find closest enemy and shoot
+                if (now - veh.droneLastShot > vDef.droneFireRate) {
+                    const target = this.findClosestEnemy(veh.droneX, veh.droneY, veh.team, dRange);
+                    if (target) {
+                        veh.droneLastShot = now;
+                        const da = Math.atan2(target.y - veh.droneY, target.x - veh.droneX);
+                        veh.droneA = da;
+                        this.spawnProjectile(veh.droneX, veh.droneY, da, veh.team, veh.id, {
+                            spd: vDef.droneProjSpd, dmg: vDef.droneDmg,
+                            r: vDef.droneProjR || 3, life: 1.6,
+                            pt: veh.type + '_drone',
                         });
                     }
                 }
@@ -1106,7 +1184,9 @@ class Room {
                             (b.type === 't'  && dist(p.x, p.y, b.x, b.y) < b.r + p.r) ||
                             (b.type === 'vd' && dist(p.x, p.y, b.x, b.y) < b.r + p.r);
                         if (hit) {
-                            const dmg = p.bonusVsBldg ? Math.round(p.dmg * 1.5) : p.dmg;
+                            const dmg = p.bonusVsBldg ? Math.round(p.dmg * 1.5)
+                                      : (p.bonusVsWall && b.type === 'w') ? Math.round(p.dmg * p.bonusVsWall)
+                                      : p.dmg;
                             // Citadel buff: temporarily lower incoming damage by 15%
                             const citBuff  = (b.citadelBuff && b._citadelBuff > now) ? 0.85 : 1.0;
                             const finalDmg = Math.round(dmg * citBuff);
@@ -1302,7 +1382,10 @@ class Room {
             slow: opts.slow || false,
             splash: opts.splash || 0,
             bonusVsBldg: opts.bonusVsBldg || false,
+            bonusVsWall: opts.bonusVsWall || 0,
             burn: opts.burn || false,
+            intercept: opts.intercept || false,
+            pierce: opts.pierce || false,
             pt: opts.pt || 't',
         });
         this.events.push({
@@ -1537,6 +1620,14 @@ class Room {
             driverId: null, passengerId: null,
             lastDriverShot: 0, lastPassengerShot: 0,
         };
+        // Initialise drone orbit state for mechs
+        if (vDef.drone) {
+            veh.droneX         = spawnX + (vDef.droneOrbitR || 52);
+            veh.droneY         = spawnY;
+            veh.droneA         = 0;
+            veh.droneOrbitAngle = 0;
+            veh.droneLastShot  = 0;
+        }
         this.vehicles.set(vid, veh);
         player.res -= spawnCost;
         this.events.push({ e: EV.VEHICLE_SPAWN, veh: wireVehicle(veh) });
@@ -1548,12 +1639,13 @@ class Room {
         const veh = this.vehicles.get(vid);
         if (!veh || veh.team !== player.team) return;
         if (dist(player.x, player.y, veh.x, veh.y) > 140) return;
+        const vDef = VEHICLE_DEFS[veh.type] || {};
 
         if (!veh.driverId) {
             veh.driverId       = player.id;
             player.vehicleId   = vid;
             player.vehicleRole = 'driver';
-        } else if (!veh.passengerId) {
+        } else if (!veh.passengerId && !vDef.singlePilot) {
             veh.passengerId    = player.id;
             player.vehicleId   = vid;
             player.vehicleRole = 'passenger';
