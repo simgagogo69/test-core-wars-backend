@@ -90,6 +90,12 @@ const MAP_DEFS = [
 
 const PH = { LOBBY: 0, BUILD: 1, ATTACK: 2, END: 3 };
 
+// Rotate a local-space muzzle offset (mx, my) by angle and add to world position (cx, cy)
+function muzzleWorld(cx, cy, angle, mx, my) {
+    const c = Math.cos(angle), s = Math.sin(angle);
+    return { x: cx + c * mx - s * my, y: cy + s * mx + c * my };
+}
+
 const EV = {
     PHASE_CHANGE   : 0,
     PLAYER_HIT     : 1,
@@ -216,11 +222,13 @@ const VEHICLE_DEFS = {
         name: 'Breaker SPG', hp: 600, maxHp: 600, spd: 110, r: 54,
         turnRate: 1.8,   // radians per second — heavy SPG turns slowly
         spawnCost: 70,
-        // Hull MG (driver)
+        // Hull MG (driver) — fixed forward on hull
         driverFireRate : 450, driverDmg: 10, driverProjSpd: 620, driverProjR: 4,
-        // Siege cannon (passenger)
+        driverMuzzle: { x: 55, y: 0 },     // hull MG tip (forward of hull)
+        // Siege cannon (passenger) — rotates on turret
         passengerFireRate: 2800, passengerDmg: 90, passengerProjSpd: 380,
         passengerProjR: 13, passengerSplash: 130,
+        passengerMuzzle: { x: 98, y: 0 },  // end of muzzle brake
     },
     'roe_suppressor': {
         name: 'Suppressor Carrier', hp: 420, maxHp: 420, spd: 155, r: 48,
@@ -228,9 +236,11 @@ const VEHICLE_DEFS = {
         spawnCost: 50,
         // Single forward MG (driver)
         driverFireRate : 220, driverDmg: 7, driverProjSpd: 660, driverProjR: 4,
+        driverMuzzle: { x: 50, y: 0 },
         // Twin rotary cannons (passenger) — high fire rate, slows enemies
         passengerFireRate: 140, passengerDmg: 5, passengerProjSpd: 540,
         passengerProjR: 5, passengerSlow: true,
+        passengerMuzzle: { x: 73, y: 0 },  // flash suppressor tip (avg of twin barrels)
     },
     // ── BGM Corp ──────────────────────────────────────────────────────────────
     'bgm_prospector': {
@@ -240,6 +250,7 @@ const VEHICLE_DEFS = {
         // Main weapon: Thermal Rivet Gun (driver shoots on aim)
         driverFireRate: 420, driverDmg: 18, driverProjSpd: 520, driverProjR: 5,
         driverBurnChance: 0.25,   // 25% chance to apply burn on hit
+        driverMuzzle: { x: 56, y: 0 },   // rivet gun tip in aim-space
         // MK-A Utility Drone — light auto MG
         drone: 'mk_a',
         droneFireRate: 600, droneDmg: 5, droneProjSpd: 580, droneProjR: 3,
@@ -249,10 +260,12 @@ const VEHICLE_DEFS = {
         name: 'BGM-7 Tunnelrat', hp: 320, maxHp: 320, spd: 175, r: 32,
         turnRate: 0, spawnCost: 48,
         isMech: true, singlePilot: true,
-        // Main weapon: Rotary Cutter — short-range high-damage, falloff at range
+        // Main weapon: Rotary Cutter — melee arc, spawns a very short-range slash projectile
         driverFireRate: 110, driverDmg: 9, driverProjSpd: 380, driverProjR: 6,
         driverMaxRange: 200,      // effective range; life capped to reach this
         driverBonusVsWall: 2.2,   // massive bonus vs walls
+        driverMuzzle: { x: 55, y: 0 },   // cutter disc centre in aim-space
+        isMeleeDriver: true,              // client renders as slash arc, not bullet
         // MK-A Utility Drone
         drone: 'mk_a',
         droneFireRate: 600, droneDmg: 5, droneProjSpd: 580, droneProjR: 3,
@@ -262,11 +275,13 @@ const VEHICLE_DEFS = {
         name: 'BGM-12 Hauler Frame', hp: 680, maxHp: 680, spd: 100, r: 52,
         turnRate: 0, spawnCost: 80,
         isMech: true, singlePilot: false,
-        // Driver: hull MG
+        // Driver: hull MG — arm at (16,-24), twin barrels tip at (54,-30)
         driverFireRate: 300, driverDmg: 8, driverProjSpd: 640, driverProjR: 4,
-        // Passenger: Mag Loader Cannon
+        driverMuzzle: { x: 54, y: -30 },
+        // Passenger: Mag Loader Cannon — arm at (16,24), barrel tip at (82,32)
         passengerFireRate: 2200, passengerDmg: 72, passengerProjSpd: 400,
         passengerProjR: 11, passengerSplash: 90,
+        passengerMuzzle: { x: 82, y: 32 },
         // MK-B Escort Drone — larger, better tracking
         drone: 'mk_b',
         droneFireRate: 380, droneDmg: 8, droneProjSpd: 620, droneProjR: 4,
@@ -275,25 +290,28 @@ const VEHICLE_DEFS = {
     'epa_citadel_interceptor': {
         name: 'Citadel Interceptor', hp: 480, maxHp: 480, spd: 130, r: 50,
         turnRate: 2.2, spawnCost: 65,
-        // Driver: precision tracking burst — short-range intercept shots
+        // Driver: precision tracking burst — twin burst guns, emitter tip at (52,0)
         driverFireRate: 300, driverDmg: 6, driverProjSpd: 700, driverProjR: 4,
-        driverIntercept: true,          // driver shots destroy nearby enemy projectiles on impact
-        // Passenger: Citadel Array — automated intercept dome (same mechanic as epa_citadel turret)
+        driverIntercept: true,
+        driverMuzzle: { x: 52, y: 0 },   // avg of twin barrel emitter tips
+        // Passenger: Citadel Array — array emitter barrel tip at (54,0)
         passengerFireRate: 220, passengerDmg: 8, passengerProjSpd: 680, passengerProjR: 5,
-        passengerIntercept: 0.55,       // chance per frame to destroy enemy projs in radius
-        passengerInterceptR: 160,       // radius of the intercept dome
+        passengerIntercept: 0.55,
+        passengerInterceptR: 160,
+        passengerMuzzle: { x: 54, y: 0 },
     },
     'epa_knox_guardian': {
         name: 'Knox Guardian', hp: 900, maxHp: 900, spd: 72, r: 60,
         turnRate: 0.9, spawnCost: 90,
-        // Driver: segmented shield emitters — creates a directional barrier burst
+        // Driver: brace — no projectile, no muzzle needed
         driverFireRate: 2200, driverDmg: 0, driverProjSpd: 0, driverProjR: 0,
-        driverBrace: true,              // activates brace: reduce incoming dmg + buff nearby friendly buildings
+        driverBrace: true,
         braceRadius: 240, braceDmgReduce: 0.45, braceBuildHeal: 4, braceDuration: 2500,
-        // Passenger: heavy directional energy barrier cannon (main gun)
+        // Passenger: heavy barrier cannon — wide muzzle emitter tip at (94,0)
         passengerFireRate: 1800, passengerDmg: 65, passengerProjSpd: 320,
         passengerProjR: 14, passengerSplash: 80,
-        passengerPierce: true,          // barrier bolt pushes through multiple targets
+        passengerPierce: true,
+        passengerMuzzle: { x: 94, y: 0 },
     },
 };
 
@@ -929,7 +947,10 @@ class Room {
                         const projLife = vDef.driverMaxRange
                             ? (vDef.driverMaxRange / (vDef.driverProjSpd || 500))
                             : 2.0;
-                        this.spawnProjectile(veh.x, veh.y, driver.a, veh.team, driver.id, {
+                        const dm = vDef.driverMuzzle;
+                        const dp = dm ? muzzleWorld(veh.x, veh.y, driver.a, dm.x, dm.y)
+                                      : { x: veh.x, y: veh.y };
+                        this.spawnProjectile(dp.x, dp.y, driver.a, veh.team, driver.id, {
                             spd: vDef.driverProjSpd, dmg: vDef.driverDmg,
                             r: vDef.driverProjR || 4, life: projLife,
                             slow: vDef.driverSlow || false,
@@ -991,7 +1012,10 @@ class Room {
                 // ── Passenger weapon (main gun) ────────────────────────────────
                 if (this.phase === PH.ATTACK && passenger.inp.sh && now - veh.lastPassengerShot > vDef.passengerFireRate) {
                     veh.lastPassengerShot = now;
-                    this.spawnProjectile(veh.x, veh.y, passenger.a, veh.team, passenger.id, {
+                    const pm = vDef.passengerMuzzle;
+                    const pp = pm ? muzzleWorld(veh.x, veh.y, passenger.a, pm.x, pm.y)
+                                  : { x: veh.x, y: veh.y };
+                    this.spawnProjectile(pp.x, pp.y, passenger.a, veh.team, passenger.id, {
                         spd: vDef.passengerProjSpd, dmg: vDef.passengerDmg,
                         r: vDef.passengerProjR || 8, life: 2.5,
                         splash: vDef.passengerSplash || 0,
