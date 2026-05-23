@@ -373,6 +373,8 @@ function wireVehicle(v) {
         dx: v.droneX !== undefined ? Math.round(v.droneX) : undefined,
         dy: v.droneY !== undefined ? Math.round(v.droneY) : undefined,
         da: v.droneA !== undefined ? encodeAngle(v.droneA) : undefined,
+        // Movement angle for mech legs (separate from v.a which is driver aim)
+        ma: v.moveA !== undefined ? encodeAngle(v.moveA) : undefined,
     };
 }
 
@@ -886,6 +888,10 @@ class Room {
                     nvx = veh.x + driver.inp.dx * spd * dt;
                     nvy = veh.y + driver.inp.dy * spd * dt;
                     veh.a = driver.a;   // mech body faces where player aims
+                    // Track movement direction separately for leg rendering
+                    const mdx = driver.inp.dx, mdy = driver.inp.dy;
+                    if (Math.hypot(mdx, mdy) > 0.05) veh.moveA = Math.atan2(mdy, mdx);
+                    // (if not moving, keep previous moveA so legs hold their last direction)
                 } else {
                     // ── Tank-style steering ────────────────────────────────────
                     const turnRate = vDef.turnRate || 2.2;
