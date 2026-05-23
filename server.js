@@ -1000,17 +1000,21 @@ class Room {
             if (passenger) {
                 veh.pa = passenger.a;
 
-                // ── Citadel Interceptor: passive intercept dome (always on) ───
+                // ── Citadel Interceptor: passive intercept dome — first entry, one roll ──
                 if (vDef.passengerIntercept && this.phase === PH.ATTACK) {
                     const intR   = vDef.passengerInterceptR || 160;
                     const chance = vDef.passengerIntercept;
+                    const srcId  = 'veh_' + veh.id;   // unique source key for this vehicle
                     for (const [pid, p] of this.projs) {
                         if (p.team === veh.team) continue;
-                        if (dist(veh.x, veh.y, p.x, p.y) < intR) {
-                            if (Math.random() < chance * dt) {   // dt-scaled so rate is frame-independent
-                                this.projs.delete(pid);
-                                this.events.push({ e: EV.PROJ_DESTROY, i: pid });
-                            }
+                        if (dist(veh.x, veh.y, p.x, p.y) >= intR) continue;
+                        if (p.interceptSeen.has(srcId)) continue;
+                        p.interceptSeen.add(srcId);
+                        if (Math.random() < chance) {
+                            this.projs.delete(pid);
+                            this.events.push({ e: EV.PROJ_DESTROY, i: pid,
+                                               sx: Math.round(veh.x), sy: Math.round(veh.y),
+                                               px: Math.round(p.x),   py: Math.round(p.y) });
                         }
                     }
                 }
@@ -1076,16 +1080,20 @@ class Room {
                     }
                 }
 
-                // ── Intercept: chance to destroy incoming enemy projectiles ──────
+                // ── Intercept: first entry into field = one roll, never again ─────
                 if ((b.intercept || 0) > 0) {
                     const intR = 140;
                     for (const [pid, p] of this.projs) {
                         if (p.team === b.team) continue;
-                        if (dist(b.x, b.y, p.x, p.y) < intR) {
-                            if (Math.random() < (b.intercept || 0)) {
-                                this.projs.delete(pid);
-                                this.events.push({ e: EV.PROJ_DESTROY, i: pid });
-                            }
+                        if (dist(b.x, b.y, p.x, p.y) >= intR) continue;
+                        if (p.interceptSeen.has(b.id)) continue;   // already rolled for this source
+                        p.interceptSeen.add(b.id);
+                        if (Math.random() < (b.intercept || 0)) {
+                            this.projs.delete(pid);
+                            // sx/sy lets client draw the intercept laser
+                            this.events.push({ e: EV.PROJ_DESTROY, i: pid,
+                                               sx: Math.round(b.x), sy: Math.round(b.y),
+                                               px: Math.round(p.x),  py: Math.round(p.y) });
                         }
                     }
                 }
@@ -1377,18 +1385,21 @@ class Room {
             }
         }
 
-        // ── EPA wall intercept: chance to destroy nearby enemy projectiles ──────
+        // ── EPA wall intercept: first entry into field = one roll, never again ─────
         if (this.phase === PH.ATTACK) {
             for (const b of this.buildings.values()) {
                 if (b.type !== 'w' || !b.intercept || b.team === undefined) continue;
                 const intR = 100;
                 for (const [pid, p] of this.projs) {
                     if (p.team === b.team) continue;
-                    if (dist(b.x, b.y, p.x, p.y) < intR) {
-                        if (Math.random() < b.intercept) {
-                            this.projs.delete(pid);
-                            this.events.push({ e: EV.PROJ_DESTROY, i: pid });
-                        }
+                    if (dist(b.x, b.y, p.x, p.y) >= intR) continue;
+                    if (p.interceptSeen.has(b.id)) continue;
+                    p.interceptSeen.add(b.id);
+                    if (Math.random() < b.intercept) {
+                        this.projs.delete(pid);
+                        this.events.push({ e: EV.PROJ_DESTROY, i: pid,
+                                           sx: Math.round(b.x), sy: Math.round(b.y),
+                                           px: Math.round(p.x),  py: Math.round(p.y) });
                     }
                 }
             }
@@ -1417,6 +1428,9 @@ class Room {
             intercept: opts.intercept || false,
             pierce: opts.pierce || false,
             pt: opts.pt || 't',
+            // Tracks which intercept sources have already processed this projectile.
+            // Each source gets exactly one roll — no repeated chances per tick.
+            interceptSeen: new Set(),
         });
         this.events.push({
             e  : EV.PROJ_SPAWN,
