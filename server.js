@@ -35,14 +35,15 @@ const PORT   = process.env.PORT || 3000;
 // ─── Constants ───────────────────────────────────────────────────────────────
 const TICK_RATE   = 30;
 const SNAP_EVERY  = 3;           // 10 Hz snapshots
-const MAP_W       = 3000;
-const MAP_H       = 1400;
+const MAP_W       = 4800;
+const MAP_H       = 2000;
 const MAX_PLAYERS = 8;
 const BUILD_TIME  = 30;
 const LOBBY_TIME  = 120;  // 2-min lobby countdown (when 2+ players, nobody voted yet)
 const VOTE_TIME   = 25;   // seconds for the dedicated voting phase
 const WALL_W      = 16;   // wall collision box size — must match client GRID_SIZE
 const WALL_HALF   = 8;    // WALL_W / 2
+const VOTE_MAP_COUNT = 3; // how many maps to randomly offer in the vote
 
 // ─── Map definitions ─────────────────────────────────────────────────────────
 // waterZones: array of {x,y,w,h} rectangles that are impassable water
@@ -52,39 +53,113 @@ const MAP_DEFS = [
     {
         id  : 0,
         name: 'WARZONE',
+        // Open flat battlefield — no water, full strategic freedom
         waterZones: [],
-        cores : [{ x: 200,         y: MAP_H / 2 }, { x: MAP_W - 200,  y: MAP_H / 2 }],
-        spawns: [{ x: 380,         y: MAP_H / 2 }, { x: MAP_W - 380,  y: MAP_H / 2 }],
+        cores : [{ x: 260,        y: MAP_H / 2 }, { x: MAP_W - 260,  y: MAP_H / 2 }],
+        spawns: [{ x: 500,        y: MAP_H / 2 }, { x: MAP_W - 500,  y: MAP_H / 2 }],
     },
     {
         id  : 1,
         name: 'ARCHIPELAGO',
-        // Red island  x:0-800, y:200-1200
-        // Blue island x:2200-3000, y:200-1200
-        // Bridge      x:800-2200,  y:540-860
+        // Two home islands connected by THREE bridges — top, center, bottom.
+        // Teams must contest multiple crossing points simultaneously.
+        // Red island:  x:0-1300
+        // Blue island: x:3500-4800
+        // Bridge 1 (top):    y:100-550
+        // Bridge 2 (center): y:800-1300
+        // Bridge 3 (bottom): y:1560-1950
         waterZones: [
-            { x: 0,    y: 0,    w: 800,  h: 200  },   // red island top corner
-            { x: 0,    y: 1200, w: 800,  h: 200  },   // red island bottom corner
-            { x: 2200, y: 0,    w: 800,  h: 200  },   // blue island top corner
-            { x: 2200, y: 1200, w: 800,  h: 200  },   // blue island bottom corner
-            { x: 800,  y: 0,    w: 1400, h: 540  },   // open sea top (above bridge)
-            { x: 800,  y: 860,  w: 1400, h: 540  },   // open sea bottom (below bridge)
+            // Open sea (top above bridge 1)
+            { x: 1300, y: 0,    w: 2200, h: 100  },
+            // Between bridge 1 and bridge 2
+            { x: 1300, y: 550,  w: 2200, h: 250  },
+            // Between bridge 2 and bridge 3
+            { x: 1300, y: 1300, w: 2200, h: 260  },
+            // Open sea (bottom below bridge 3)
+            { x: 1300, y: 1950, w: 2200, h: 50   },
+            // Red island corner coves (natural coastline)
+            { x: 0,    y: 0,    w: 380,  h: 100  },
+            { x: 0,    y: 1950, w: 380,  h: 50   },
+            // Blue island corner coves
+            { x: 4420, y: 0,    w: 380,  h: 100  },
+            { x: 4420, y: 1950, w: 380,  h: 50   },
+            // Small center lagoon on bridge 2 (creates mid-bridge chokepoint island)
+            { x: 2050, y: 880,  w: 700,  h: 160  },
         ],
-        cores : [{ x: 250,  y: MAP_H / 2 }, { x: MAP_W - 250,  y: MAP_H / 2 }],
-        spawns: [{ x: 430,  y: MAP_H / 2 }, { x: MAP_W - 430,  y: MAP_H / 2 }],
+        cores : [{ x: 300,        y: MAP_H / 2 }, { x: MAP_W - 300,  y: MAP_H / 2 }],
+        spawns: [{ x: 580,        y: MAP_H / 2 }, { x: MAP_W - 580,  y: MAP_H / 2 }],
     },
     {
         id  : 2,
         name: 'CHOKEPOINT',
-        // Red base  x:0-950,   full height
-        // Blue base x:2050-3000, full height
-        // Middle corridor x:950-2050, y:380-1020
+        // Wide home bases. The center opens into two corridors (top and bottom lanes)
+        // plus a narrow center land-bridge with a mid-map island platform.
+        // Top lane:      y:180-700
+        // Center narrow: y:900-1150  (plus island platform at center x)
+        // Bottom lane:   y:1380-1900
         waterZones: [
-            { x: 950, y: 0,    w: 1100, h: 380  },   // sea top-centre
-            { x: 950, y: 1020, w: 1100, h: 380  },   // sea bottom-centre
+            { x: 1500, y: 0,    w: 1800, h: 180  },   // top sea cap
+            { x: 1500, y: 700,  w: 1800, h: 200  },   // between top and center
+            // Center narrow flanked by water — island platform hole left open at x:2200-2600
+            { x: 1500, y: 900,  w: 700,  h: 250  },   // center-left water
+            { x: 2600, y: 900,  w: 700,  h: 250  },   // center-right water
+            { x: 1500, y: 1150, w: 1800, h: 230  },   // between center and bottom
+            { x: 1500, y: 1900, w: 1800, h: 100  },   // bottom sea cap
         ],
-        cores : [{ x: 200,         y: MAP_H / 2 }, { x: MAP_W - 200,  y: MAP_H / 2 }],
-        spawns: [{ x: 380,         y: MAP_H / 2 }, { x: MAP_W - 380,  y: MAP_H / 2 }],
+        cores : [{ x: 260,        y: MAP_H / 2 }, { x: MAP_W - 260,  y: MAP_H / 2 }],
+        spawns: [{ x: 500,        y: MAP_H / 2 }, { x: MAP_W - 500,  y: MAP_H / 2 }],
+    },
+    {
+        id  : 3,
+        name: 'DELTA',
+        // River delta — three parallel water channels cut through the center,
+        // creating four land corridors of varying widths. Team bases are wide open.
+        // Corridor 1 (top strip):    y:0-380
+        // Channel 1:                 y:380-640
+        // Corridor 2 (upper island): y:640-980
+        // Channel 2 (center):        y:980-1260
+        // Corridor 3 (lower island): y:1260-1600
+        // Channel 3:                 y:1600-1860
+        // Corridor 4 (bottom strip): y:1860-2000
+        waterZones: [
+            // Three channels in the central zone x:1250-3550
+            { x: 1250, y: 380,  w: 2300, h: 260  },   // channel 1
+            { x: 1250, y: 980,  w: 2300, h: 280  },   // channel 2 (widest)
+            { x: 1250, y: 1600, w: 2300, h: 260  },   // channel 3
+            // Side inlets from home islands into channels (natural estuary feel)
+            { x: 980,  y: 0,    w: 270,  h: 380  },   // red top inlet
+            { x: 980,  y: 1600, w: 270,  h: 400  },   // red bottom inlet
+            { x: 3550, y: 0,    w: 270,  h: 380  },   // blue top inlet
+            { x: 3550, y: 1600, w: 270,  h: 400  },   // blue bottom inlet
+            // Small mid-channel rocks/islet that breaks channel 2 slightly
+            { x: 2050, y: 980,  w: 50,   h: 280  },   // stub — splits ch2 to hint at islands
+        ],
+        cores : [{ x: 260,        y: MAP_H / 2 }, { x: MAP_W - 260,  y: MAP_H / 2 }],
+        spawns: [{ x: 500,        y: MAP_H / 2 }, { x: MAP_W - 500,  y: MAP_H / 2 }],
+    },
+    {
+        id  : 4,
+        name: 'FRACTURE',
+        // Two asymmetric deep-water lakes force diagonal routing.
+        // Lake 1 (upper-left of center):  blocks direct top approach.
+        // Lake 2 (lower-right of center): blocks direct bottom approach.
+        // Three viable paths emerge:
+        //   Top route:    sneak above lake 1 via upper-right corridor
+        //   Center route: thread the gap between lakes (y:880-1120)
+        //   Bottom route: sweep below lake 2 via lower-left corridor
+        waterZones: [
+            // Lake 1: upper-left center
+            { x: 1380, y: 0,    w: 1480, h: 880  },
+            // Lake 2: lower-right center
+            { x: 1940, y: 1120, w: 1480, h: 880  },
+            // Coastal inlets (give bases a rocky, eroded feel)
+            { x: 0,    y: 0,    w: 220,  h: 360  },   // red top-left bay
+            { x: 0,    y: 1700, w: 300,  h: 300  },   // red bottom bay
+            { x: 4580, y: 0,    w: 220,  h: 300  },   // blue top bay
+            { x: 4500, y: 1640, w: 300,  h: 360  },   // blue bottom-right bay
+        ],
+        cores : [{ x: 260,        y: MAP_H / 2 }, { x: MAP_W - 260,  y: MAP_H / 2 }],
+        spawns: [{ x: 500,        y: MAP_H / 2 }, { x: MAP_W - 500,  y: MAP_H / 2 }],
     },
 ];
 
@@ -527,8 +602,12 @@ class Room {
     resolveMap() {
         const v = {};
         for (const mapId of this.mapVotes.values()) v[mapId] = (v[mapId] || 0) + 1;
-        const entries = Object.entries(v);
-        if (entries.length === 0) return MAP_DEFS[Math.floor(Math.random() * MAP_DEFS.length)];
+        const options = this._voteMapOptionIds || MAP_DEFS.map(m => m.id);
+        const entries = Object.entries(v).filter(e => options.includes(+e[0]));
+        if (entries.length === 0) {
+            const fallbackId = options[Math.floor(Math.random() * options.length)];
+            return MAP_DEFS.find(m => m.id === fallbackId) || MAP_DEFS[0];
+        }
         const maxV = Math.max(...entries.map(e => +e[1]));
         const tied = entries.filter(e => +e[1] === maxV).map(e => +e[0]);
         const winId = tied[Math.floor(Math.random() * tied.length)];
@@ -548,13 +627,18 @@ class Room {
         this.mapVotes     = new Map();
         let countdown = VOTE_TIME;
 
+        // Pick VOTE_MAP_COUNT random maps from all MAP_DEFS for this vote
+        const shuffled = [...MAP_DEFS].sort(() => Math.random() - 0.5);
+        const voteOptions = shuffled.slice(0, VOTE_MAP_COUNT);
+        this._voteMapOptionIds = voteOptions.map(m => m.id);
+
         // Send votestart individually so map list is included
         for (const p of this.players.values()) {
             if (p.ws.readyState === WebSocket.OPEN) {
                 p.ws.send(JSON.stringify({
                     t    : 'votestart',
                     tm   : VOTE_TIME,
-                    maps : MAP_DEFS.map(m => ({ id: m.id, name: m.name })),
+                    maps : voteOptions.map(m => ({ id: m.id, name: m.name })),
                     team : p.team,
                 }));
             }
@@ -1884,7 +1968,8 @@ wss.on('connection', (ws) => {
             } else if (data.t === 'mvote' && room && room.inVotePhase) {
                 const player = room.players.get(id);
                 const mapId  = +data.m;
-                if (player && MAP_DEFS.some(m => m.id === mapId)) {
+                const validIds = room._voteMapOptionIds || MAP_DEFS.map(m => m.id);
+                if (player && validIds.includes(mapId)) {
                     room.mapVotes.set(id, mapId);
                     room.broadcastMapVotes();
                 }
