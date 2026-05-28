@@ -443,12 +443,7 @@
             projSpd: 700, projR: 4, spread: 0.04,
             magSize: 30, range: 600, falloffStart: 400,
         },
-        'ar_heavy': {
-            id: 'ar_heavy', name: 'AR-20 Assault', category: 'assault_rifle',
-            dmg: 19, fireRate: 140, reloadTime: 2400,
-            projSpd: 680, projR: 4, spread: 0.06,
-            magSize: 25, range: 580, falloffStart: 380,
-        },
+
         // ── Battle Rifles ─────────────────────────────────────────────────────
         'br_precision': {
             id: 'br_precision', name: 'Ravager BR', category: 'battle_rifle',
@@ -464,12 +459,7 @@
             projSpd: 640, projR: 3, spread: 0.09,
             magSize: 35, range: 400, falloffStart: 250,
         },
-        'smg_extended': {
-            id: 'smg_extended', name: 'Striker PDW', category: 'submachine_gun',
-            dmg: 11, fireRate: 82, reloadTime: 1900,
-            projSpd: 620, projR: 3, spread: 0.10,
-            magSize: 42, range: 380, falloffStart: 240,
-        },
+
         // ── Light Machine Guns ────────────────────────────────────────────────
         'lmg_standard': {
             id: 'lmg_standard', name: 'Torrent LMG', category: 'light_machine_gun',
@@ -583,115 +573,130 @@
     // Only a representative sample is implemented here; the structure
     // cleanly supports dozens more.
     // ═══════════════════════════════════════════════════════════════════════════
+
+    // ── Role weapon pools ────────────────────────────────────────────────────
+    // Single source of truth for which 3 weapons each role can equip.
+    // Every operator of the same role — regardless of faction — gets exactly
+    // this list in exactly this order.  Change it here once; all 18 operators
+    // update automatically.  No per-faction or per-operator overrides.
+    const ROLE_WEAPON_POOLS = {
+        breacher    : ['ar_standard',      'br_precision',  'shotgun_pump'    ],
+        engineer    : ['smg_compact',      'lmg_standard',  'pistol_standard' ],
+        recon       : ['sniper_long',      'dmr_standard',  'revolver_heavy'  ],
+        anti_vehicle: ['hmg_suppression',  'lmg_standard',  'shotgun_pump'    ],
+        suppression : ['lmg_standard',     'shotgun_pump',  'smg_compact'     ],
+        support     : ['pistol_standard',  'revolver_heavy','smg_compact'     ],
+    };
+
     const OPERATOR_DEFS = {
         // ── ROE Operators ─────────────────────────────────────────────────────
         'roe_breacher': {
             id: 'roe_breacher', displayName: 'Wrecking Crew', faction: 'roe', role: 'breacher',
-            allowedWeapons: ['ar_heavy', 'shotgun_pump'],
+            allowedWeapons: ROLE_WEAPON_POOLS.breacher,
             abilityId: 'speed_boost',
             desc: 'Fast entry specialist. Closes distance with a sprint burst.',
         },
         'roe_engineer': {
             id: 'roe_engineer', displayName: 'Ironclad', faction: 'roe', role: 'engineer',
-            allowedWeapons: ['smg_compact', 'pistol_standard'],
+            allowedWeapons: ROLE_WEAPON_POOLS.engineer,
             abilityId: null,
             desc: 'Field engineer. Cheap builds, quick repairs.',
         },
         'roe_recon': {
             id: 'roe_recon', displayName: 'Pathfinder', faction: 'roe', role: 'recon',
-            allowedWeapons: ['dmr_standard', 'pistol_standard'],
+            allowedWeapons: ROLE_WEAPON_POOLS.recon,
             abilityId: null,
-            desc: 'Scout. Uses the DMR to harass from distance.',
+            desc: 'Scout. Harasses flanks and locks down long sightlines.',
         },
         'roe_anti_vehicle': {
             id: 'roe_anti_vehicle', displayName: 'Wrecker', faction: 'roe', role: 'anti_vehicle',
-            allowedWeapons: ['br_precision', 'revolver_heavy'],
+            allowedWeapons: ROLE_WEAPON_POOLS.anti_vehicle,
             abilityId: null,
-            desc: 'Anti-armor. High-damage rifles crack vehicle hulls.',
+            desc: 'Anti-armor. Sustained heavy fire cracks vehicle hulls.',
         },
         'roe_suppression': {
             id: 'roe_suppression', displayName: 'Trencher', faction: 'roe', role: 'suppression',
-            allowedWeapons: ['lmg_standard', 'hmg_suppression'],
+            allowedWeapons: ROLE_WEAPON_POOLS.suppression,
             abilityId: null,
-            desc: 'Suppression specialist. Denies lanes with sustained fire.',
+            desc: 'Suppression specialist. Denies lanes with sustained area fire.',
         },
         'roe_support': {
             id: 'roe_support', displayName: 'Lifeline', faction: 'roe', role: 'support',
-            allowedWeapons: ['smg_compact', 'smg_extended'],  // shared SMG with engineer
+            allowedWeapons: ROLE_WEAPON_POOLS.support,
             abilityId: null,
             desc: 'Team support. Keeps allies moving and scrap flowing.',
         },
         // ── BGM Operators ─────────────────────────────────────────────────────
         'bgm_breacher': {
             id: 'bgm_breacher', displayName: 'Slag Runner', faction: 'bgm', role: 'breacher',
-            allowedWeapons: ['shotgun_pump', 'smg_compact'],
+            allowedWeapons: ROLE_WEAPON_POOLS.breacher,
             abilityId: 'speed_boost',
             desc: 'Industrial breacher. Charges through fortifications.',
         },
         'bgm_engineer': {
             id: 'bgm_engineer', displayName: 'Rigger', faction: 'bgm', role: 'engineer',
-            allowedWeapons: ['smg_extended', 'pistol_standard'],
+            allowedWeapons: ROLE_WEAPON_POOLS.engineer,
             abilityId: null,
             desc: 'Mines specialist. Places heavy structures faster.',
         },
         'bgm_recon': {
             id: 'bgm_recon', displayName: 'Surveyor', faction: 'bgm', role: 'recon',
-            allowedWeapons: ['ar_standard', 'pistol_standard'],
+            allowedWeapons: ROLE_WEAPON_POOLS.recon,
             abilityId: null,
             desc: 'Survey team scout. Marks terrain and enemy positions.',
         },
         'bgm_anti_vehicle': {
             id: 'bgm_anti_vehicle', displayName: 'Foreman', faction: 'bgm', role: 'anti_vehicle',
-            allowedWeapons: ['br_precision', 'sniper_long'],
+            allowedWeapons: ROLE_WEAPON_POOLS.anti_vehicle,
             abilityId: null,
-            desc: 'Heavy equipment operator. Punches through vehicle armor.',
+            desc: 'Heavy equipment operator. Industrial-grade anti-armor pressure.',
         },
         'bgm_suppression': {
             id: 'bgm_suppression', displayName: 'Excavator', faction: 'bgm', role: 'suppression',
-            allowedWeapons: ['hmg_suppression', 'lmg_standard'],
+            allowedWeapons: ROLE_WEAPON_POOLS.suppression,
             abilityId: null,
             desc: 'Digs in and suppresses with industrial-grade firepower.',
         },
         'bgm_support': {
             id: 'bgm_support', displayName: 'Quartermaster', faction: 'bgm', role: 'support',
-            allowedWeapons: ['smg_compact', 'smg_extended'],  // shared SMG — same WEAPON_DEFS entry
+            allowedWeapons: ROLE_WEAPON_POOLS.support,
             abilityId: null,
             desc: 'Resource conduit. Keeps the front line supplied.',
         },
         // ── EPA Operators ─────────────────────────────────────────────────────
         'epa_breacher': {
             id: 'epa_breacher', displayName: 'Aegis Vanguard', faction: 'epa', role: 'breacher',
-            allowedWeapons: ['ar_standard', 'shotgun_pump'],
+            allowedWeapons: ROLE_WEAPON_POOLS.breacher,
             abilityId: 'speed_boost',
             desc: 'Precision entry. EPA-issue breach protocol enables rapid advance.',
         },
         'epa_engineer': {
             id: 'epa_engineer', displayName: 'Systems Tech', faction: 'epa', role: 'engineer',
-            allowedWeapons: ['smg_compact', 'pistol_standard'],
+            allowedWeapons: ROLE_WEAPON_POOLS.engineer,
             abilityId: null,
             desc: 'Field technician. Optimizes EPA defensive systems.',
         },
         'epa_recon': {
             id: 'epa_recon', displayName: 'Observer', faction: 'epa', role: 'recon',
-            allowedWeapons: ['sniper_long', 'dmr_standard'],
+            allowedWeapons: ROLE_WEAPON_POOLS.recon,
             abilityId: null,
             desc: 'Long-range surveillance. Pairs with the EPA\'s precision doctrine.',
         },
         'epa_anti_vehicle': {
             id: 'epa_anti_vehicle', displayName: 'Interceptor', faction: 'epa', role: 'anti_vehicle',
-            allowedWeapons: ['br_precision', 'dmr_standard'],
+            allowedWeapons: ROLE_WEAPON_POOLS.anti_vehicle,
             abilityId: null,
-            desc: 'Vehicle denial. EPA-grade armor-piercing rounds.',
+            desc: 'Vehicle denial. EPA-grade armor-piercing sustained fire.',
         },
         'epa_suppression': {
             id: 'epa_suppression', displayName: 'Bulwark', faction: 'epa', role: 'suppression',
-            allowedWeapons: ['lmg_standard', 'hmg_suppression'],
+            allowedWeapons: ROLE_WEAPON_POOLS.suppression,
             abilityId: null,
             desc: 'Defensive line-holder. Outranges most infantry weapons.',
         },
         'epa_support': {
             id: 'epa_support', displayName: 'Field Analyst', faction: 'epa', role: 'support',
-            allowedWeapons: ['smg_extended', 'ar_standard'],
+            allowedWeapons: ROLE_WEAPON_POOLS.support,
             abilityId: null,
             desc: 'Tactical coordinator. EPA doctrine optimized for team play.',
         },
