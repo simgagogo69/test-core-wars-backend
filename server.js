@@ -952,7 +952,7 @@
             this.inVotePhase = true;
             this.factionVotes = { 0: new Map(), 1: new Map() };
             this.mapVotes     = new Map();
-            let countdown = VOTE_TIME;
+            this._voteCountdown = VOTE_TIME;
 
             // Pick VOTE_MAP_COUNT random maps from all MAP_DEFS for this vote
             const shuffled = [...MAP_DEFS].sort(() => Math.random() - 0.5);
@@ -973,10 +973,24 @@
 
             const vi = setInterval(() => {
                 if (this.players.size === 0) { clearInterval(vi); return; }
-                countdown--;
-                this.broadcastRaw(JSON.stringify({ t: 'votetick', tm: countdown }));
-                if (countdown <= 0) { clearInterval(vi); this.startOperatorSelectPhase(); }
+                this._voteCountdown--;
+                this.broadcastRaw(JSON.stringify({ t: 'votetick', tm: this._voteCountdown }));
+                if (this._voteCountdown <= 0) { clearInterval(vi); this.startOperatorSelectPhase(); }
             }, 1000);
+        }
+
+        // If every player has cast both votes and >3 s remain, snap to 3 s.
+        checkAllVotedEarlyEnd() {
+            if (!this.inVotePhase || this._voteCountdown <= 3) return;
+            const n = this.players.size;
+            if (n === 0) return;
+            for (const p of this.players.values()) {
+                if (!this.factionVotes[p.team].has(p.id)) return;
+                if (!this.mapVotes.has(p.id)) return;
+            }
+            // Everyone voted — snap countdown to 3
+            this._voteCountdown = 3;
+            this.broadcastRaw(JSON.stringify({ t: 'votetick', tm: 3 }));
         }
 
         // ═══════════════════════════════════════════════════════════════════
@@ -2634,6 +2648,7 @@
                     if (player && ['roe', 'bgm', 'epa'].includes(data.f)) {
                         room.factionVotes[player.team].set(id, data.f);
                         room.broadcastFactionVotes();
+                        room.checkAllVotedEarlyEnd();
                     }
 
                 } else if (data.t === 'mvote' && room && room.inVotePhase) {
@@ -2643,6 +2658,7 @@
                     if (player && validIds.includes(mapId)) {
                         room.mapVotes.set(id, mapId);
                         room.broadcastMapVotes();
+                        room.checkAllVotedEarlyEnd();
                     }
 
                 // ── Operator selection (during OPERATOR_SELECT phase) ─────────
