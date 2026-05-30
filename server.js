@@ -166,9 +166,7 @@
     const PH = { LOBBY: 0, BUILD: 1, ATTACK: 2, END: 3, OPERATOR_SELECT: 4 };
 
     // ─── Operator Select phase duration ──────────────────────────────────────────
-    // No enforced timer — phase ends when every connected player locks in.
-    // Safety fallback of 5 min prevents the room from hanging if someone disconnects.
-    const OPERATOR_SELECT_TIME = 300;
+    const OPERATOR_SELECT_TIME = 30;  // seconds players have to pick operator + weapon
 
     // Rotate a local-space muzzle offset (mx, my) by angle and add to world position (cx, cy)
     function muzzleWorld(cx, cy, angle, mx, my) {
@@ -954,7 +952,7 @@
             this.inVotePhase = true;
             this.factionVotes = { 0: new Map(), 1: new Map() };
             this.mapVotes     = new Map();
-            this._voteCountdown = VOTE_TIME;
+            let countdown = VOTE_TIME;
 
             // Pick VOTE_MAP_COUNT random maps from all MAP_DEFS for this vote
             const shuffled = [...MAP_DEFS].sort(() => Math.random() - 0.5);
@@ -973,28 +971,12 @@
                 }
             }
 
-            this._voteInterval = setInterval(() => {
-                if (this.players.size === 0) { clearInterval(this._voteInterval); return; }
-                this._voteCountdown--;
-                this.broadcastRaw(JSON.stringify({ t: 'votetick', tm: this._voteCountdown }));
-                if (this._voteCountdown <= 0) { clearInterval(this._voteInterval); this.startOperatorSelectPhase(); }
+            const vi = setInterval(() => {
+                if (this.players.size === 0) { clearInterval(vi); return; }
+                countdown--;
+                this.broadcastRaw(JSON.stringify({ t: 'votetick', tm: countdown }));
+                if (countdown <= 0) { clearInterval(vi); this.startOperatorSelectPhase(); }
             }, 1000);
-        }
-
-        // Check if every player has submitted both a faction vote and a map vote.
-        // If so, and more than 3 s remain, snap the countdown to 3.
-        checkAllVotedEarlyEnd() {
-            if (!this.inVotePhase) return;
-            if (this._voteCountdown <= 3) return;
-            const n = this.players.size;
-            if (n === 0) return;
-            for (const p of this.players.values()) {
-                if (!this.factionVotes[p.team].has(p.id)) return;
-                if (!this.mapVotes.has(p.id)) return;
-            }
-            // Everyone voted — cut to 3 s
-            this._voteCountdown = 3;
-            this.broadcastRaw(JSON.stringify({ t: 'votetick', tm: 3 }));
         }
 
         // ═══════════════════════════════════════════════════════════════════
@@ -1008,13 +990,13 @@
         //      - the timer duration
         //   3. Players send 'op_select' and 'wp_select' messages to choose
         //   4. Players send 'op_lock' to confirm their loadout
-        //   5. When all players locked OR timer expires → startGame()
-        //      Any player who didn't lock gets a random loadout assigned
+        //   5. Each player picks operator+weapon and drops in independently via handleLockIn()
+        //      No timer, no waiting — the game world runs from vote resolution onward
         // ═══════════════════════════════════════════════════════════════════
         startOperatorSelectPhase() {
             if (this.inOperatorSelect) return;
 
-            // Resolve factions from votes (needed before sending op lists)
+            // Resolve factions/map from votes first
             this.teamFactions[0] = this.resolveFaction(0);
             this.teamFactions[1] = this.resolveFaction(1);
             this.mapDef = this.resolveMap();
@@ -1026,87 +1008,108 @@
             this.inOperatorSelect = true;
             this.inVotePhase      = false;
 
-            // Reset all player lock-in state
+            // Reset vote/lobby state
+            this.factionVotes  = { 0: new Map(), 1: new Map() };
+            this.mapVotes      = new Map();
+            this.readyStates   = new Map();
+
+            this.phase   = PH.BUILD;
+            this.timer   = BUILD_TIME;
+            this.winner  = -1;
+            this.events  = [];
+
+            this.cores.forEach(c => { c.hp = c.maxHp; });
+            this.buildings.clear();
+            this.projs.clear();
+            this.vehicles.clear();
+
+            this._prevPhase    = -1;
+            this._prevTimer    = -1;
+            this._prevCoreHPs  = [-1, -1];
+            this._lastScrapTick = null;
+
+            // Initialise all players — rt=9999 keeps them out of the world until
+            // they individually lock their loadout via handleLockIn
             for (const p of this.players.values()) {
-                p.operatorId = null;
-                p.weaponId   = null;
-                p.lockedIn   = false;
+                p.operatorId     = null;
+                p.weaponId       = null;
+                p.lockedIn       = false;
+                p.res            = 150;
+                p.hp             = p.maxHp;
+                p.rt             = 9999;
+                p.burnUntil      = 0;
+                p._lastBurnTick  = 0;
+                p.vehicleId      = null;
+                p.vehicleRole    = null;
+                p._weaponFireRate = 200;
+                p._weaponProjSpd  = 700;
+                p._weaponDmg      = 15;
+                p._weaponProjR    = 5;
+                p._weaponSpread   = 0.04;
+                p._weaponPellets  = 1;
+                p.activeAbility   = null;
+                p.abilityCooldown = 0;
+                p.speedBoostUntil = 0;
+                const spawn = this.mapDef.spawns[p.team];
+                p.x   = spawn.x;
+                p.y   = spawn.y;
+                p._px = -1; p._py = -1; p._ab = -1;
             }
 
-            let countdown = OPERATOR_SELECT_TIME;
+            // Start the game world immediately (BUILD timer ticks while players pick)
+            this.broadcastRaw(JSON.stringify({
+                t      : 'start',
+                ph     : this.phase,
+                tm     : this.timer,
+                cHps   : [this.cores[0].hp, this.cores[1].hp],
+                fcts   : this.teamFactions,
+                mapId  : this.mapDef.id,
+                mapName: this.mapDef.name,
+                wz     : this.mapDef.waterZones,
+                spawns : this.mapDef.spawns,
+                loadouts   : [],
+                droppingIn : true,   // client shows op-select overlay, not the game canvas
+            }));
 
-            // Send per-player: each player only sees operators for their faction
+            // Per-player opselect_start (each sees only their faction's operators)
             for (const p of this.players.values()) {
                 if (p.ws.readyState !== WebSocket.OPEN) continue;
-                const faction    = this.teamFactions[p.team];
-                const operators  = getOperatorsForFaction(faction);
-
-                // Build a compact weapon table containing only weapons used by
-                // this faction's operators — avoids sending irrelevant data
-                const weaponIds  = new Set(operators.flatMap(op => op.allowedWeapons));
-                const weapons    = {};
+                const faction   = this.teamFactions[p.team];
+                const operators = getOperatorsForFaction(faction);
+                const weaponIds = new Set(operators.flatMap(op => op.allowedWeapons));
+                const weapons   = {};
                 for (const wid of weaponIds) {
                     const w = WEAPON_DEFS[wid];
                     if (w) weapons[wid] = { id: w.id, name: w.name, category: w.category,
                         dmg: w.dmg, fireRate: w.fireRate, magSize: w.magSize, range: w.range };
                 }
-
                 p.ws.send(JSON.stringify({
-                    t         : 'opselect_start',
-                    tm        : OPERATOR_SELECT_TIME,
-                    faction   : faction,
-                    operators : operators.map(op => ({
+                    t        : 'opselect_start',
+                    tm       : 0,
+                    faction,
+                    operators: operators.map(op => ({
                         id: op.id, displayName: op.displayName, role: op.role,
                         desc: op.desc, allowedWeapons: op.allowedWeapons,
                         abilityId: op.abilityId,
                     })),
-                    weapons,    // compact weapon table for this faction
+                    weapons,
                 }));
             }
 
-            this.operatorSelTimer = setInterval(() => {
-                if (this.players.size === 0) { clearInterval(this.operatorSelTimer); return; }
-                countdown--;
-                // No tick broadcast — client shows no timer for operator select.
-                // End only via all-locked (checked in handleLockIn) or safety timeout.
-                if (countdown <= 0) {
-                    clearInterval(this.operatorSelTimer);
-                    this.operatorSelTimer = null;
-                    this._finalizeOperatorSelect();
+            // Build-phase timer — runs independently of any player's lock-in
+            this.timerInt = setInterval(() => {
+                if (this.players.size === 0) return;
+                if (this.phase === PH.BUILD) {
+                    this.timer--;
+                    if (this.timer <= 0) {
+                        this.phase = PH.ATTACK;
+                        this.timer = 0;
+                        this.events.push({ e: EV.PHASE_CHANGE, ph: PH.ATTACK });
+                    }
                 }
             }, 1000);
-        }
 
-        // Assign random loadouts to any player who didn't lock in, then start game
-        _finalizeOperatorSelect() {
-            this.inOperatorSelect = false;
-
-            for (const p of this.players.values()) {
-                if (!p.lockedIn) {
-                    // Auto-assign a random loadout for their faction
-                    const faction  = this.teamFactions[p.team] || 'roe';
-                    const fallback = getRandomLoadout(faction);
-                    p.operatorId   = fallback.operatorId;
-                    p.weaponId     = fallback.weaponId;
-                    p.lockedIn     = true;
-                }
-            }
-
-            // Broadcast final loadout summary to all clients (LOADOUT_SYNC event)
-            // Clients render operator names and weapons from this point forward
-            const loadouts = [];
-            for (const p of this.players.values()) {
-                loadouts.push({
-                    id: p.id,
-                    operatorId : p.operatorId,
-                    weaponId   : p.weaponId,
-                    role       : OPERATOR_DEFS[p.operatorId]?.role || 'breacher',
-                });
-            }
-            this.broadcastRaw(JSON.stringify({ t: 'opselect_done', loadouts }));
-
-            // Small delay so clients can render the final loadouts before game starts
-            setTimeout(() => this.startGame(), 1200);
+            this.tickInt = setInterval(() => this.tick(), 1000 / TICK_RATE);
         }
 
         // ── Operator selection from client ───────────────────────────────────
@@ -1147,22 +1150,55 @@
             }
         }
 
-        // ── Lock-in from client ───────────────────────────────────────────────
-        // Called when player sends { t: 'op_lock' }
+        // ── Lock-in: individual drop-in, no dependency on other players ──────────
+        // Called when a player sends { t: 'op_lock' } (triggered client-side as soon
+        // as they pick an operator + weapon).  Each player drops into the live world
+        // independently — others are unaffected.
         handleLockIn(player) {
-            if (!this.inOperatorSelect) return;
-            if (!player.operatorId || !player.weaponId) return;  // must have both selected
             if (player.lockedIn) return;
+            if (!player.operatorId || !player.weaponId) return;
 
             player.lockedIn = true;
-            // Notify all clients that this player locked in (for the lock-in UI)
+
+            // Apply this player's weapon stats
+            const weapDef = WEAPON_DEFS[player.weaponId];
+            player._weaponFireRate = weapDef ? weapDef.fireRate  : 200;
+            player._weaponProjSpd  = weapDef ? weapDef.projSpd   : 700;
+            player._weaponDmg      = weapDef ? weapDef.dmg       : 15;
+            player._weaponProjR    = weapDef ? weapDef.projR      : 5;
+            player._weaponSpread   = weapDef ? weapDef.spread     : 0.04;
+            player._weaponPellets  = weapDef ? (weapDef.pellets   || 1) : 1;
+            player.activeAbility   = null;
+            player.abilityCooldown = 0;
+            player.speedBoostUntil = 0;
+
+            // Spawn into the live world right now
+            const spawn = this.mapDef ? this.mapDef.spawns[player.team] : { x: 400, y: 1000 };
+            player.x  = spawn.x;
+            player.y  = spawn.y;
+            player.hp = player.maxHp;
+            player.rt = 0;
+            player.burnUntil = 0;
+
+            this.events.push({
+                e : EV.PLAYER_SPAWN,
+                i : player.id,
+                x : Math.round(player.x),
+                y : Math.round(player.y),
+                hp: player.hp,
+            });
+
+            // Tell all clients this player locked in (for status pips on the overlay)
             this.broadcastRaw(JSON.stringify({ t: 'op_locked', id: player.id }));
 
-            // If every connected player is now locked in, start the game immediately
-            const allLocked = [...this.players.values()].every(p => p.lockedIn);
-            if (allLocked) {
-                if (this.operatorSelTimer) { clearInterval(this.operatorSelTimer); this.operatorSelTimer = null; }
-                this._finalizeOperatorSelect();
+            // Tell THIS player to close the overlay and enter the game
+            if (player.ws.readyState === WebSocket.OPEN) {
+                player.ws.send(JSON.stringify({
+                    t         : 'drop_in',
+                    operatorId: player.operatorId,
+                    weaponId  : player.weaponId,
+                    role      : OPERATOR_DEFS[player.operatorId]?.role || null,
+                }));
             }
         }
 
@@ -2598,7 +2634,6 @@
                     if (player && ['roe', 'bgm', 'epa'].includes(data.f)) {
                         room.factionVotes[player.team].set(id, data.f);
                         room.broadcastFactionVotes();
-                        room.checkAllVotedEarlyEnd();
                     }
 
                 } else if (data.t === 'mvote' && room && room.inVotePhase) {
@@ -2608,7 +2643,6 @@
                     if (player && validIds.includes(mapId)) {
                         room.mapVotes.set(id, mapId);
                         room.broadcastMapVotes();
-                        room.checkAllVotedEarlyEnd();
                     }
 
                 // ── Operator selection (during OPERATOR_SELECT phase) ─────────
