@@ -166,7 +166,9 @@
     const PH = { LOBBY: 0, BUILD: 1, ATTACK: 2, END: 3, OPERATOR_SELECT: 4 };
 
     // ─── Operator Select phase duration ──────────────────────────────────────────
-    const OPERATOR_SELECT_TIME = 30;  // seconds players have to pick operator + weapon
+    // No enforced timer — phase ends when every connected player locks in.
+    // Safety fallback of 5 min prevents the room from hanging if someone disconnects.
+    const OPERATOR_SELECT_TIME = 300;
 
     // Rotate a local-space muzzle offset (mx, my) by angle and add to world position (cx, cy)
     function muzzleWorld(cx, cy, angle, mx, my) {
@@ -952,7 +954,7 @@
             this.inVotePhase = true;
             this.factionVotes = { 0: new Map(), 1: new Map() };
             this.mapVotes     = new Map();
-            let countdown = VOTE_TIME;
+            this._voteCountdown = VOTE_TIME;
 
             // Pick VOTE_MAP_COUNT random maps from all MAP_DEFS for this vote
             const shuffled = [...MAP_DEFS].sort(() => Math.random() - 0.5);
@@ -971,12 +973,28 @@
                 }
             }
 
-            const vi = setInterval(() => {
-                if (this.players.size === 0) { clearInterval(vi); return; }
-                countdown--;
-                this.broadcastRaw(JSON.stringify({ t: 'votetick', tm: countdown }));
-                if (countdown <= 0) { clearInterval(vi); this.startOperatorSelectPhase(); }
+            this._voteInterval = setInterval(() => {
+                if (this.players.size === 0) { clearInterval(this._voteInterval); return; }
+                this._voteCountdown--;
+                this.broadcastRaw(JSON.stringify({ t: 'votetick', tm: this._voteCountdown }));
+                if (this._voteCountdown <= 0) { clearInterval(this._voteInterval); this.startOperatorSelectPhase(); }
             }, 1000);
+        }
+
+        // Check if every player has submitted both a faction vote and a map vote.
+        // If so, and more than 3 s remain, snap the countdown to 3.
+        checkAllVotedEarlyEnd() {
+            if (!this.inVotePhase) return;
+            if (this._voteCountdown <= 3) return;
+            const n = this.players.size;
+            if (n === 0) return;
+            for (const p of this.players.values()) {
+                if (!this.factionVotes[p.team].has(p.id)) return;
+                if (!this.mapVotes.has(p.id)) return;
+            }
+            // Everyone voted — cut to 3 s
+            this._voteCountdown = 3;
+            this.broadcastRaw(JSON.stringify({ t: 'votetick', tm: 3 }));
         }
 
         // ═══════════════════════════════════════════════════════════════════
@@ -1049,19 +1067,12 @@
             this.operatorSelTimer = setInterval(() => {
                 if (this.players.size === 0) { clearInterval(this.operatorSelTimer); return; }
                 countdown--;
-                this.broadcastRaw(JSON.stringify({ t: 'opselect_tick', tm: countdown }));
+                // No tick broadcast — client shows no timer for operator select.
+                // End only via all-locked (checked in handleLockIn) or safety timeout.
                 if (countdown <= 0) {
                     clearInterval(this.operatorSelTimer);
                     this.operatorSelTimer = null;
                     this._finalizeOperatorSelect();
-                } else {
-                    // Check if every player has locked in early
-                    const allLocked = [...this.players.values()].every(p => p.lockedIn);
-                    if (allLocked) {
-                        clearInterval(this.operatorSelTimer);
-                        this.operatorSelTimer = null;
-                        this._finalizeOperatorSelect();
-                    }
                 }
             }, 1000);
         }
@@ -1146,6 +1157,13 @@
             player.lockedIn = true;
             // Notify all clients that this player locked in (for the lock-in UI)
             this.broadcastRaw(JSON.stringify({ t: 'op_locked', id: player.id }));
+
+            // If every connected player is now locked in, start the game immediately
+            const allLocked = [...this.players.values()].every(p => p.lockedIn);
+            if (allLocked) {
+                if (this.operatorSelTimer) { clearInterval(this.operatorSelTimer); this.operatorSelTimer = null; }
+                this._finalizeOperatorSelect();
+            }
         }
 
         // ═══════════════════════════════════════════════════════════════════════
@@ -1364,6 +1382,7 @@
                 p._weaponDmg      = weapDef ? weapDef.dmg       : 15;
                 p._weaponProjR    = weapDef ? weapDef.projR      : 5;
                 p._weaponSpread   = weapDef ? weapDef.spread     : 0.04;
+                p._weaponPellets  = weapDef ? (weapDef.pellets   || 1) : 1;  // shotgun pellet count
                 // ── Reset ability state ───────────────────────────────────────
                 p.activeAbility   = null;
                 p.abilityCooldown = 0;
@@ -1519,17 +1538,22 @@
 
                 if (this.phase === PH.ATTACK && player.inp.sh && now - player.lastShot > (player._weaponFireRate || 200)) {
                     player.lastShot = now;
-                    // Spread: small random offset applied to aim angle
-                    const spread = player._weaponSpread || 0.04;
-                    const angle  = player.a + (Math.random() - 0.5) * spread;
-                    this.spawnProjectile(player.x, player.y, angle, player.team, player.id,
-                        {
-                            spd : player._weaponProjSpd || 700,
-                            dmg : player._weaponDmg     || 15,
-                            r   : player._weaponProjR   || 5,
-                            life: 2.0,
-                            pt  : player.weaponId || 'pl',
-                        });
+                    const pellets = player._weaponPellets || 1;
+                    const spread  = player._weaponSpread  || 0.04;
+                    const projOpts = {
+                        spd : player._weaponProjSpd || 700,
+                        dmg : player._weaponDmg     || 15,
+                        r   : player._weaponProjR   || 5,
+                        life: 2.0,
+                        pt  : player.weaponId || 'pl',
+                    };
+                    // For multi-pellet weapons (shotguns): spawn one projectile per
+                    // pellet, each with an independent random spread offset.
+                    // Single-pellet weapons take the same path with pellets === 1.
+                    for (let i = 0; i < pellets; i++) {
+                        const angle = player.a + (Math.random() - 0.5) * spread;
+                        this.spawnProjectile(player.x, player.y, angle, player.team, player.id, projOpts);
+                    }
                 }
             }
 
@@ -2574,6 +2598,7 @@
                     if (player && ['roe', 'bgm', 'epa'].includes(data.f)) {
                         room.factionVotes[player.team].set(id, data.f);
                         room.broadcastFactionVotes();
+                        room.checkAllVotedEarlyEnd();
                     }
 
                 } else if (data.t === 'mvote' && room && room.inVotePhase) {
@@ -2583,6 +2608,7 @@
                     if (player && validIds.includes(mapId)) {
                         room.mapVotes.set(id, mapId);
                         room.broadcastMapVotes();
+                        room.checkAllVotedEarlyEnd();
                     }
 
                 // ── Operator selection (during OPERATOR_SELECT phase) ─────────
