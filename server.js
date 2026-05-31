@@ -198,6 +198,7 @@
         LOADOUT_SYNC   : 19,   // broadcast all players' locked loadouts when phase begins
         ABILITY_USED   : 20,   // a player activated their active ability
         ABILITY_READY  : 21,   // player's ability cooldown expired (server tells client)
+        SUPP_DEVICE    : 22,   // Duster deploys a suppression device
     };
 
     // ─── Turret upgrade tree ──────────────────────────────────────────────────────
@@ -597,23 +598,31 @@
         // LEVIATHAN (Anti-Vehicle) — shoulder-launched rocket burst
         'rocket_barrage': {
             id: 'rocket_barrage', name: 'Rocket Barrage',
-            desc: 'Fires a burst of 5 unguided rockets from shoulder launchers.',
+            desc: 'Fires a burst of 5 unguided rockets alternating from shoulder launchers.',
             cooldown: 20, duration: 0,
             handler(room, player) {
-                const aRef  = player.a;
+                const aRef    = player.a;
                 const rockets = 5;
+                // Perpendicular direction (right of aim = +90°)
+                // Shoulder launchers are ~13px out to each side in world space
+                const SHOULDER_DIST = 13;
+                const perpA = aRef + Math.PI / 2;
+                const perpX = Math.cos(perpA);
+                const perpY = Math.sin(perpA);
+
                 for (let i = 0; i < rockets; i++) {
-                    const spread   = (i - 2) * 0.10;
-                    const sideSign = (i % 2 === 0) ? 1 : -1;
-                    // Offset from shoulder launcher positions (~13px to the side)
-                    const ox = player.x + Math.cos(player.a + Math.PI / 2) * sideSign * 13;
-                    const oy = player.y + Math.sin(player.a + Math.PI / 2) * sideSign * 13;
-                    const delay = i * 90;
+                    // Strictly alternate: even = right shoulder, odd = left shoulder
+                    const side = (i % 2 === 0) ? 1 : -1;
+                    // Slight spread: rockets 0-4 fan out gently
+                    const spread = (i - 2) * 0.07;
+                    const ox = player.x + perpX * side * SHOULDER_DIST;
+                    const oy = player.y + perpY * side * SHOULDER_DIST;
+                    const delay = i * 100;
                     setTimeout(() => {
                         if (!room.players.has(player.id)) return;
                         room.spawnProjectile(ox, oy, aRef + spread, player.team, player.id, {
-                            spd: 520, dmg: 48, r: 7, life: 1.9,
-                            splash: 50, bonusVsBldg: true,
+                            spd: 480, dmg: 48, r: 7, life: 2.0,
+                            splash: 55, bonusVsBldg: true,
                             pt: 'rocket',
                         });
                     }, delay);
@@ -622,26 +631,29 @@
             },
         },
 
-        // DUSTER (Suppression) — sustained burst of slowing rounds in a cone
+        // DUSTER (Suppression) — deploys a device that fires in a cone
         'suppression_field': {
             id: 'suppression_field', name: 'Suppression Field',
-            desc: 'Deploys a sustained barrage of suppressive rounds in a forward arc.',
-            cooldown: 20, duration: 2,
+            desc: 'Drops a suppression device that fires continuous slowing bursts in a forward cone for 5 seconds.',
+            cooldown: 22, duration: 5,
             handler(room, player) {
-                const baseA = player.a;
-                const bursts = 14;
-                for (let i = 0; i < bursts; i++) {
-                    const spread = (Math.random() - 0.5) * 0.55;
-                    setTimeout(() => {
-                        if (!room.players.has(player.id)) return;
-                        room.spawnProjectile(player.x, player.y, baseA + spread, player.team, player.id, {
-                            spd: 440, dmg: 7, r: 4, life: 1.4,
-                            slow: true,
-                            pt: 'supp_field',
-                        });
-                    }, i * 140);
-                }
-                return { abilityId: 'suppression_field', duration: 2 };
+                const devId  = shortId();
+                const dur    = 5; // seconds
+                const expiresAt = Date.now() + dur * 1000;
+                // Place device at player's current position, facing their aim direction
+                if (!room.suppDevices) room.suppDevices = new Map();
+                room.suppDevices.set(devId, {
+                    id: devId, x: player.x, y: player.y, a: player.a,
+                    team: player.team, expiresAt,
+                    lastShot: Date.now(),
+                });
+                // Tell clients about the device (they render it on canvas)
+                room.events.push({
+                    e: EV.SUPP_DEVICE, id: devId,
+                    x: Math.round(player.x), y: Math.round(player.y),
+                    a: +player.a.toFixed(4), tm: player.team, dur,
+                });
+                return { abilityId: 'suppression_field', duration: dur };
             },
         },
 
@@ -653,13 +665,15 @@
             handler(room, player) {
                 const STIM_RADIUS = 190;
                 const now = Date.now();
+                const stimmed = [];
                 for (const p of room.players.values()) {
                     if (p.team !== player.team) continue;
                     if (Math.hypot(p.x - player.x, p.y - player.y) <= STIM_RADIUS) {
                         p.speedBoostUntil = now + 4000;
+                        stimmed.push(p.id);
                     }
                 }
-                return { abilityId: 'combat_stim', duration: 4 };
+                return { abilityId: 'combat_stim', duration: 4, stimmed };
             },
         },
     };
@@ -1151,6 +1165,7 @@
             this.buildings.clear();
             this.projs.clear();
             this.vehicles.clear();
+            if (this.suppDevices) this.suppDevices.clear();
 
             this._prevPhase    = -1;
             this._prevTimer    = -1;
@@ -1524,6 +1539,7 @@
             this.buildings.clear();
             this.projs.clear();
             this.vehicles.clear();
+            if (this.suppDevices) this.suppDevices.clear();
 
             this._prevPhase   = -1;
             this._prevTimer   = -1;
@@ -2270,6 +2286,25 @@
                                             sx: Math.round(b.x), sy: Math.round(b.y),
                                             px: Math.round(p.x),  py: Math.round(p.y) });
                         }
+                    }
+                }
+            }
+
+            // ── Suppression Devices (Duster ability) ─────────────────────────────────
+            if (this.suppDevices && this.suppDevices.size > 0 && this.phase === PH.ATTACK) {
+                const SUPP_FIRE_RATE = 180;  // ms between shots per device
+                const SUPP_CONE     = 0.45;  // half-angle of fire cone (radians, ~26°)
+                for (const [did, dev] of this.suppDevices) {
+                    if (now >= dev.expiresAt) { this.suppDevices.delete(did); continue; }
+                    if (now - dev.lastShot < SUPP_FIRE_RATE) continue;
+                    dev.lastShot = now;
+                    // Fire 2 rounds per burst in a cone
+                    for (let _si = 0; _si < 2; _si++) {
+                        const spread = (Math.random() - 0.5) * SUPP_CONE * 2;
+                        this.spawnProjectile(dev.x, dev.y, dev.a + spread, dev.team, null, {
+                            spd: 420, dmg: 7, r: 4, life: 1.3,
+                            slow: true, pt: 'supp_field',
+                        });
                     }
                 }
             }
