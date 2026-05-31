@@ -529,24 +529,139 @@
     //   3. Implement handler() — everything else (cooldown tracking, WS events) is automatic
     // ═══════════════════════════════════════════════════════════════════════════
     const ABILITY_DEFS = {
-        // ── Test ability: temporary speed boost (proves the system works) ─────
+        // ── Legacy test ability ───────────────────────────────────────────────
         'speed_boost': {
             id: 'speed_boost', name: 'Sprint Protocol',
             desc: 'Temporarily doubles movement speed for 3 seconds.',
-            cooldown: 12,    // 12 seconds
-            duration: 3,     // 3-second boost
-            // handler() is called server-side when the player activates the ability.
-            // Future abilities can spawn projectiles, buff allies, place deployables, etc.
+            cooldown: 12, duration: 3,
             handler(room, player) {
                 player.speedBoostUntil = Date.now() + 3000;
-                // Return event data to broadcast to all clients
                 return { abilityId: 'speed_boost', duration: 3 };
             },
         },
-        // ── Placeholder: future abilities plug in here ────────────────────────
-        // 'deployable_cover': { ... handler: places a temp wall ... }
-        // 'emp_burst': { ... handler: disables nearby turrets ... }
-        // 'heal_pulse': { ... handler: heals nearby allies ... }
+
+        // ── ROE OPERATOR ABILITIES ────────────────────────────────────────────
+
+        // TITAN (Breacher) — magnetic explosive charge
+        'breach_charge': {
+            id: 'breach_charge', name: 'Breach Charge',
+            desc: 'Throws a magnetic explosive that sticks to surfaces and detonates with a heavy splash.',
+            cooldown: 14, duration: 0,
+            handler(room, player) {
+                room.spawnProjectile(player.x, player.y, player.a, player.team, player.id, {
+                    spd: 240, dmg: 65, r: 9, life: 2.4,
+                    splash: 80, bonusVsBldg: true,
+                    pt: 'breach_charge',
+                });
+                return { abilityId: 'breach_charge', duration: 0 };
+            },
+        },
+
+        // PEGASUS (Engineer) — repair nearby vehicles and structures
+        'field_repair': {
+            id: 'field_repair', name: 'Field Repair',
+            desc: 'Repairs nearby friendly vehicles and structures.',
+            cooldown: 18, duration: 3,
+            handler(room, player) {
+                const REPAIR_RADIUS = 130;
+                const REPAIR_AMOUNT = 35;
+                for (const b of room.buildings.values()) {
+                    if (b.team !== player.team) continue;
+                    if (Math.hypot(b.x - player.x, b.y - player.y) <= REPAIR_RADIUS) {
+                        b.hp = Math.min(b.maxHp, b.hp + REPAIR_AMOUNT);
+                        room.events.push({ e: EV.BUILD_HIT, i: b.id, hp: b.hp });
+                    }
+                }
+                for (const v of room.vehicles.values()) {
+                    if (v.team !== player.team) continue;
+                    if (Math.hypot(v.x - player.x, v.y - player.y) <= REPAIR_RADIUS) {
+                        v.hp = Math.min(v.maxHp, v.hp + REPAIR_AMOUNT);
+                    }
+                }
+                return { abilityId: 'field_repair', duration: 3 };
+            },
+        },
+
+        // PHANTOM (Recon) — near-invisible speed dash
+        'phantom_rush': {
+            id: 'phantom_rush', name: 'Phantom Rush',
+            desc: 'Become nearly invisible and move faster for 3 seconds.',
+            cooldown: 16, duration: 3,
+            handler(room, player) {
+                player.speedBoostUntil = Date.now() + 3000;
+                player.invisibleUntil  = Date.now() + 3000;
+                return { abilityId: 'phantom_rush', duration: 3 };
+            },
+        },
+
+        // LEVIATHAN (Anti-Vehicle) — shoulder-launched rocket burst
+        'rocket_barrage': {
+            id: 'rocket_barrage', name: 'Rocket Barrage',
+            desc: 'Fires a burst of 5 unguided rockets from shoulder launchers.',
+            cooldown: 20, duration: 0,
+            handler(room, player) {
+                const aRef  = player.a;
+                const rockets = 5;
+                for (let i = 0; i < rockets; i++) {
+                    const spread   = (i - 2) * 0.10;
+                    const sideSign = (i % 2 === 0) ? 1 : -1;
+                    // Offset from shoulder launcher positions (~13px to the side)
+                    const ox = player.x + Math.cos(player.a + Math.PI / 2) * sideSign * 13;
+                    const oy = player.y + Math.sin(player.a + Math.PI / 2) * sideSign * 13;
+                    const delay = i * 90;
+                    setTimeout(() => {
+                        if (!room.players.has(player.id)) return;
+                        room.spawnProjectile(ox, oy, aRef + spread, player.team, player.id, {
+                            spd: 520, dmg: 48, r: 7, life: 1.9,
+                            splash: 50, bonusVsBldg: true,
+                            pt: 'rocket',
+                        });
+                    }, delay);
+                }
+                return { abilityId: 'rocket_barrage', duration: 0 };
+            },
+        },
+
+        // DUSTER (Suppression) — sustained burst of slowing rounds in a cone
+        'suppression_field': {
+            id: 'suppression_field', name: 'Suppression Field',
+            desc: 'Deploys a sustained barrage of suppressive rounds in a forward arc.',
+            cooldown: 20, duration: 2,
+            handler(room, player) {
+                const baseA = player.a;
+                const bursts = 14;
+                for (let i = 0; i < bursts; i++) {
+                    const spread = (Math.random() - 0.5) * 0.55;
+                    setTimeout(() => {
+                        if (!room.players.has(player.id)) return;
+                        room.spawnProjectile(player.x, player.y, baseA + spread, player.team, player.id, {
+                            spd: 440, dmg: 7, r: 4, life: 1.4,
+                            slow: true,
+                            pt: 'supp_field',
+                        });
+                    }, i * 140);
+                }
+                return { abilityId: 'suppression_field', duration: 2 };
+            },
+        },
+
+        // ZEPHYR (Support) — speed stim to nearby allies
+        'combat_stim': {
+            id: 'combat_stim', name: 'Combat Stim',
+            desc: 'Nearby allies gain increased movement speed for 4 seconds.',
+            cooldown: 18, duration: 4,
+            handler(room, player) {
+                const STIM_RADIUS = 190;
+                const now = Date.now();
+                for (const p of room.players.values()) {
+                    if (p.team !== player.team) continue;
+                    if (Math.hypot(p.x - player.x, p.y - player.y) <= STIM_RADIUS) {
+                        p.speedBoostUntil = now + 4000;
+                    }
+                }
+                return { abilityId: 'combat_stim', duration: 4 };
+            },
+        },
     };
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -591,40 +706,40 @@
     const OPERATOR_DEFS = {
         // ── ROE Operators ─────────────────────────────────────────────────────
         'roe_breacher': {
-            id: 'roe_breacher', displayName: 'Wrecking Crew', faction: 'roe', role: 'breacher',
+            id: 'roe_breacher', displayName: 'Titan', faction: 'roe', role: 'breacher',
             allowedWeapons: ROLE_WEAPON_POOLS.breacher,
-            abilityId: 'speed_boost',
-            desc: 'Fast entry specialist. Closes distance with a sprint burst.',
+            abilityId: 'breach_charge',
+            desc: 'Frontline defense killer. Throws magnetic Breach Charges that stick to walls, vehicles, and turrets before detonating.',
         },
         'roe_engineer': {
-            id: 'roe_engineer', displayName: 'Ironclad', faction: 'roe', role: 'engineer',
+            id: 'roe_engineer', displayName: 'Pegasus', faction: 'roe', role: 'engineer',
             allowedWeapons: ROLE_WEAPON_POOLS.engineer,
-            abilityId: null,
-            desc: 'Field engineer. Cheap builds, quick repairs.',
+            abilityId: 'field_repair',
+            desc: 'Vehicle and turret repair specialist. Field Repair pulses wrist emitters to restore nearby friendly structures and vehicles.',
         },
         'roe_recon': {
-            id: 'roe_recon', displayName: 'Pathfinder', faction: 'roe', role: 'recon',
+            id: 'roe_recon', displayName: 'Phantom', faction: 'roe', role: 'recon',
             allowedWeapons: ROLE_WEAPON_POOLS.recon,
-            abilityId: null,
-            desc: 'Scout. Harasses flanks and locks down long sightlines.',
+            abilityId: 'phantom_rush',
+            desc: 'Vision intel and flank specialist. Phantom Rush renders nearly invisible for 3 seconds at boosted speed.',
         },
         'roe_anti_vehicle': {
-            id: 'roe_anti_vehicle', displayName: 'Wrecker', faction: 'roe', role: 'anti_vehicle',
+            id: 'roe_anti_vehicle', displayName: 'Leviathan', faction: 'roe', role: 'anti_vehicle',
             allowedWeapons: ROLE_WEAPON_POOLS.anti_vehicle,
-            abilityId: null,
-            desc: 'Anti-armor. Sustained heavy fire cracks vehicle hulls.',
+            abilityId: 'rocket_barrage',
+            desc: 'Anti-tank and mech destroyer. Oversized shoulder launchers fire a burst of 5 unguided rockets.',
         },
         'roe_suppression': {
-            id: 'roe_suppression', displayName: 'Trencher', faction: 'roe', role: 'suppression',
+            id: 'roe_suppression', displayName: 'Duster', faction: 'roe', role: 'suppression',
             allowedWeapons: ROLE_WEAPON_POOLS.suppression,
-            abilityId: null,
-            desc: 'Suppression specialist. Denies lanes with sustained area fire.',
+            abilityId: 'suppression_field',
+            desc: 'Area denial and lane pressure. Suppression Field unleashes a sustained cone of slowing fire.',
         },
         'roe_support': {
-            id: 'roe_support', displayName: 'Lifeline', faction: 'roe', role: 'support',
+            id: 'roe_support', displayName: 'Zephyr', faction: 'roe', role: 'support',
             allowedWeapons: ROLE_WEAPON_POOLS.support,
-            abilityId: null,
-            desc: 'Team support. Keeps allies moving and scrap flowing.',
+            abilityId: 'combat_stim',
+            desc: 'Heal utility and team buffing. Combat Stim supercharges nearby allies with a speed burst.',
         },
         // ── BGM Operators ─────────────────────────────────────────────────────
         'bgm_breacher': {
@@ -1300,7 +1415,8 @@
                 // Ability state — updated by handleAbility()
                 activeAbility:    null,    // currently running ability id (null = none active)
                 abilityCooldown:  0,       // server timestamp when cooldown expires
-                speedBoostUntil:  0,       // example: speed_boost ability end time
+                speedBoostUntil:  0,       // speed_boost / phantom_rush / combat_stim
+                invisibleUntil:   0,       // phantom_rush: client renders transparent
             });
 
             ws.send(JSON.stringify({
