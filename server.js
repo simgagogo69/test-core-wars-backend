@@ -203,6 +203,8 @@
         SCOUT_DRONE    : 24,   // Daemon launches a scout drone
         SHIELD_EMITTER : 25,   // Konig projects a stationary energy shield
         PINCER_DASH    : 26,   // Blackjack dash — tells clients to render trail
+        DRONE_HIT      : 27,   // Scout/repair drone took damage
+        DRONE_DESTROY  : 28,   // Scout/repair drone destroyed
     };
 
     // ─── Turret upgrade tree ──────────────────────────────────────────────────────
@@ -687,22 +689,26 @@
         'pincer_rush': {
             id: 'pincer_rush', name: 'Pincer Rush',
             desc: 'Charges forward with beetle pincers, damaging enemies and structures on contact.',
-            cooldown: 12, duration: 0.35,
+            cooldown: 14, duration: 1.5,
             handler(room, player) {
-                const DASH_DIST   = 180;
+                const DASH_DIST   = 200;
                 const DASH_DMG    = 55;
                 const DASH_RADIUS = 22;
-                const DASH_DUR    = 350;   // ms — real movement over time
-                const steps       = 12;
-                const dx          = Math.cos(player.a);
-                const dy          = Math.sin(player.a);
-                const hitPlayers  = new Set();
-                const hitBuilds   = new Set();
-
-                // Broadcast start immediately for trail VFX
+                const DASH_DUR    = 1500;  // ms — 1.5 seconds
+                const steps       = 20;    // more steps = smoother
                 const startX = player.x, startY = player.y;
-                const endX   = Math.max(player.r, Math.min(room.mapW || 3200, player.x + dx * DASH_DIST));
-                const endY   = Math.max(player.r, Math.min(room.mapH || 2400, player.y + dy * DASH_DIST));
+                const dx     = Math.cos(player.a);
+                const dy     = Math.sin(player.a);
+                const hitPlayers = new Set();
+                const hitBuilds  = new Set();
+
+                // Clamp end point using real MAP_W/MAP_H constants
+                const rawEndX = player.x + dx * DASH_DIST;
+                const rawEndY = player.y + dy * DASH_DIST;
+                const endX    = Math.max(player.r, Math.min(MAP_W - player.r, rawEndX));
+                const endY    = Math.max(player.r, Math.min(MAP_H - player.r, rawEndY));
+
+                // Broadcast dash trail immediately
                 room.events.push({
                     e: EV.PINCER_DASH, i: player.id,
                     sx: Math.round(startX), sy: Math.round(startY),
@@ -710,18 +716,17 @@
                     dur: DASH_DUR,
                 });
 
-                // Move player smoothly across the dash path via setTimeout steps
+                // Move smoothly via stepped setTimeouts
                 player.dashing = true;
                 for (let s = 1; s <= steps; s++) {
                     const frac  = s / steps;
                     const delay = (frac * DASH_DUR) | 0;
                     setTimeout(() => {
                         if (!room.players.has(player.id)) return;
-                        const cx = startX + dx * DASH_DIST * frac;
-                        const cy = startY + dy * DASH_DIST * frac;
-                        player.x = Math.max(player.r, Math.min(room.mapW || 3200, cx));
-                        player.y = Math.max(player.r, Math.min(room.mapH || 2400, cy));
-                        // Damage sweep
+                        player.x = startX + (endX - startX) * frac;
+                        player.y = startY + (endY - startY) * frac;
+
+                        // Damage sweep at each step
                         for (const p of room.players.values()) {
                             if (p.id === player.id || p.team === player.team || p.rt > 0) continue;
                             if (hitPlayers.has(p.id)) continue;
@@ -753,7 +758,7 @@
                         if (s === steps) player.dashing = false;
                     }, delay);
                 }
-                return { abilityId: 'pincer_rush', duration: 0.35 };
+                return { abilityId: 'pincer_rush', duration: 1.5 };
             },
         },
 
@@ -784,23 +789,23 @@
         'scout_drone': {
             id: 'scout_drone', name: 'Scout Drone',
             desc: 'Launches a scout drone that flies forward, spots enemies, and fires a light MG.',
-            cooldown: 20, duration: 6,
+            cooldown: 20, duration: 0,
             handler(room, player) {
                 const droneId = shortId();
-                const dur     = 6;
                 if (!room.scoutDrones) room.scoutDrones = new Map();
                 room.scoutDrones.set(droneId, {
                     id: droneId, x: player.x, y: player.y, a: player.a,
                     team: player.team, ownerId: player.id,
-                    expiresAt: Date.now() + dur * 1000,
+                    hp: 80, maxHp: 80,      // HP-based — no timer
                     lastShot: Date.now(), spd: 90,
                 });
                 room.events.push({
                     e: EV.SCOUT_DRONE, id: droneId, ownerId: player.id,
                     x: Math.round(player.x), y: Math.round(player.y),
-                    a: +player.a.toFixed(4), tm: player.team, dur,
+                    a: +player.a.toFixed(4), tm: player.team,
+                    hp: 80, maxHp: 80,
                 });
-                return { abilityId: 'scout_drone', duration: dur };
+                return { abilityId: 'scout_drone', duration: 0 };
             },
         },
 
@@ -2512,13 +2517,31 @@
             if (this.scoutDrones && this.scoutDrones.size > 0) {
                 const DRONE_FIRE_RATE = 350;
                 const DRONE_RANGE     = 200;
+                const DRONE_HITBOX    = 14;   // radius enemies can shoot
                 for (const [did, drone] of this.scoutDrones) {
-                    if (now >= drone.expiresAt) { this.scoutDrones.delete(did); continue; }
+                    // HP-based death — no time expiry
+                    if (drone.hp <= 0) {
+                        this.scoutDrones.delete(did);
+                        this.events.push({ e: EV.DRONE_DESTROY, id: did, tp: 'scout' });
+                        continue;
+                    }
+                    // Check if any enemy projectile hits the drone
+                    for (const [pid, p] of this.projs) {
+                        if (p.team === drone.team) continue;
+                        if (Math.hypot(p.x - drone.x, p.y - drone.y) <= DRONE_HITBOX) {
+                            drone.hp -= p.dmg;
+                            this.projs.delete(pid);
+                            this.events.push({ e: EV.DRONE_HIT, id: did, hp: drone.hp, tp: 'scout' });
+                            if (drone.hp <= 0) break;
+                        }
+                    }
+                    if (drone.hp <= 0) { this.scoutDrones.delete(did); this.events.push({ e: EV.DRONE_DESTROY, id: did, tp: 'scout' }); continue; }
+
                     // Advance drone forward
                     drone.x += Math.cos(drone.a) * drone.spd * dt;
                     drone.y += Math.sin(drone.a) * drone.spd * dt;
-                    drone.x = Math.max(20, Math.min((this.mapW || 3200) - 20, drone.x));
-                    drone.y = Math.max(20, Math.min((this.mapH || 2400) - 20, drone.y));
+                    drone.x = Math.max(20, Math.min(MAP_W - 20, drone.x));
+                    drone.y = Math.max(20, Math.min(MAP_H - 20, drone.y));
                     // Find nearest enemy and steer
                     let closest = this.findClosestEnemy(drone.x, drone.y, drone.team, DRONE_RANGE);
                     if (closest) drone.a = Math.atan2(closest.y - drone.y, closest.x - drone.x);
@@ -2526,8 +2549,7 @@
                     if (closest && now - drone.lastShot >= DRONE_FIRE_RATE) {
                         drone.lastShot = now;
                         this.spawnProjectile(drone.x, drone.y, drone.a, drone.team, drone.ownerId, {
-                            spd: 580, dmg: 6, r: 3, life: 0.8,
-                            pt: 'bgm_scout_mg',
+                            spd: 580, dmg: 6, r: 3, life: 0.8, pt: 'bgm_scout_mg',
                         });
                     }
                 }
@@ -3164,8 +3186,8 @@
                     const drone = room.scoutDrones?.get(data.id);
                     // Validate drone belongs to this player's team
                     if (drone && drone.ownerId === id && drone.team === player.team) {
-                        const x = clamp(+(data.x) || drone.x, 0, room.mapW || 3200);
-                        const y = clamp(+(data.y) || drone.y, 0, room.mapH || 2400);
+                        const x = clamp(+(data.x) || drone.x, 0, MAP_W);
+                        const y = clamp(+(data.y) || drone.y, 0, MAP_H);
                         const a = +(data.a) || drone.a;
                         // Update drone position to client-reported value (player controls it)
                         drone.x = x; drone.y = y; drone.a = a;
