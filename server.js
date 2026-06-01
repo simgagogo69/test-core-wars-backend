@@ -687,65 +687,73 @@
         'pincer_rush': {
             id: 'pincer_rush', name: 'Pincer Rush',
             desc: 'Charges forward with beetle pincers, damaging enemies and structures on contact.',
-            cooldown: 12, duration: 0,
+            cooldown: 12, duration: 0.35,
             handler(room, player) {
                 const DASH_DIST   = 180;
                 const DASH_DMG    = 55;
                 const DASH_RADIUS = 22;
-                const steps       = 8;
-                const stepDist    = DASH_DIST / steps;
+                const DASH_DUR    = 350;   // ms — real movement over time
+                const steps       = 12;
                 const dx          = Math.cos(player.a);
                 const dy          = Math.sin(player.a);
                 const hitPlayers  = new Set();
                 const hitBuilds   = new Set();
-                // Walk along dash path, deal damage to anything hit
-                for (let s = 1; s <= steps; s++) {
-                    const cx = player.x + dx * stepDist * s;
-                    const cy = player.y + dy * stepDist * s;
-                    for (const p of room.players.values()) {
-                        if (p.id === player.id || p.team === player.team || p.rt > 0) continue;
-                        if (hitPlayers.has(p.id)) continue;
-                        if (Math.hypot(p.x - cx, p.y - cy) <= DASH_RADIUS + 14) {
-                            hitPlayers.add(p.id);
-                            p.hp -= DASH_DMG;
-                            if (p.hp <= 0) {
-                                p.hp = 0; p.rt = 3;
-                                room.events.push({ e: EV.PLAYER_DIE, i: p.id });
-                            } else {
-                                room.events.push({ e: EV.PLAYER_HIT, i: p.id, hp: p.hp });
-                            }
-                        }
-                    }
-                    for (const [bid, b] of room.buildings) {
-                        if (b.team === player.team || hitBuilds.has(bid)) continue;
-                        if (Math.hypot(b.x - cx, b.y - cy) <= DASH_RADIUS + 20) {
-                            hitBuilds.add(bid);
-                            b.hp -= DASH_DMG;
-                            if (b.hp <= 0) {
-                                b.hp = 0;
-                                room.buildings.delete(bid);
-                                room.events.push({ e: EV.BUILD_DESTROY, i: bid });
-                            } else {
-                                room.events.push({ e: EV.BUILD_HIT, i: bid, hp: b.hp });
-                            }
-                        }
-                    }
-                }
-                // Teleport player to end of dash
-                const endX = Math.max(player.r, Math.min(room.mapW || 3200, player.x + dx * DASH_DIST));
-                const endY = Math.max(player.r, Math.min(room.mapH || 2400, player.y + dy * DASH_DIST));
-                player.x = endX;
-                player.y = endY;
-                // Broadcast dash trail VFX
+
+                // Broadcast start immediately for trail VFX
+                const startX = player.x, startY = player.y;
+                const endX   = Math.max(player.r, Math.min(room.mapW || 3200, player.x + dx * DASH_DIST));
+                const endY   = Math.max(player.r, Math.min(room.mapH || 2400, player.y + dy * DASH_DIST));
                 room.events.push({
-                    e: EV.PINCER_DASH,
-                    i: player.id,
-                    sx: Math.round(player.x - dx * DASH_DIST),
-                    sy: Math.round(player.y - dy * DASH_DIST),
-                    ex: Math.round(player.x),
-                    ey: Math.round(player.y),
+                    e: EV.PINCER_DASH, i: player.id,
+                    sx: Math.round(startX), sy: Math.round(startY),
+                    ex: Math.round(endX),   ey: Math.round(endY),
+                    dur: DASH_DUR,
                 });
-                return { abilityId: 'pincer_rush', duration: 0 };
+
+                // Move player smoothly across the dash path via setTimeout steps
+                player.dashing = true;
+                for (let s = 1; s <= steps; s++) {
+                    const frac  = s / steps;
+                    const delay = (frac * DASH_DUR) | 0;
+                    setTimeout(() => {
+                        if (!room.players.has(player.id)) return;
+                        const cx = startX + dx * DASH_DIST * frac;
+                        const cy = startY + dy * DASH_DIST * frac;
+                        player.x = Math.max(player.r, Math.min(room.mapW || 3200, cx));
+                        player.y = Math.max(player.r, Math.min(room.mapH || 2400, cy));
+                        // Damage sweep
+                        for (const p of room.players.values()) {
+                            if (p.id === player.id || p.team === player.team || p.rt > 0) continue;
+                            if (hitPlayers.has(p.id)) continue;
+                            if (Math.hypot(p.x - player.x, p.y - player.y) <= DASH_RADIUS + 14) {
+                                hitPlayers.add(p.id);
+                                p.hp -= DASH_DMG;
+                                if (p.hp <= 0) {
+                                    p.hp = 0; p.rt = 3;
+                                    room.events.push({ e: EV.PLAYER_DIE, i: p.id });
+                                } else {
+                                    room.events.push({ e: EV.PLAYER_HIT, i: p.id, hp: p.hp });
+                                }
+                            }
+                        }
+                        for (const [bid, b] of room.buildings) {
+                            if (b.team === player.team || hitBuilds.has(bid)) continue;
+                            if (Math.hypot(b.x - player.x, b.y - player.y) <= DASH_RADIUS + 20) {
+                                hitBuilds.add(bid);
+                                b.hp -= DASH_DMG;
+                                if (b.hp <= 0) {
+                                    b.hp = 0;
+                                    room.buildings.delete(bid);
+                                    room.events.push({ e: EV.BUILD_DESTROY, i: bid });
+                                } else {
+                                    room.events.push({ e: EV.BUILD_HIT, i: bid, hp: b.hp });
+                                }
+                            }
+                        }
+                        if (s === steps) player.dashing = false;
+                    }, delay);
+                }
+                return { abilityId: 'pincer_rush', duration: 0.35 };
             },
         },
 
@@ -788,7 +796,7 @@
                     lastShot: Date.now(), spd: 90,
                 });
                 room.events.push({
-                    e: EV.SCOUT_DRONE, id: droneId,
+                    e: EV.SCOUT_DRONE, id: droneId, ownerId: player.id,
                     x: Math.round(player.x), y: Math.round(player.y),
                     a: +player.a.toFixed(4), tm: player.team, dur,
                 });
@@ -821,7 +829,7 @@
                     setTimeout(() => {
                         if (!room.players.has(player.id)) return;
                         room.spawnProjectile(player.x, player.y, player.a + spread, player.team, player.id, {
-                            spd: 320, dmg: 12, r: 5, life: 0.9,
+                            spd: 200, dmg: 14, r: 6, life: 0.9,
                             burn: true, pt: 'bgm_flame',
                         });
                     }, i * 75);
@@ -2585,22 +2593,19 @@
                     if (now >= shield.expiresAt || shield.hp <= 0) {
                         this.shieldEmitters.delete(sid); continue;
                     }
-                    // Intercept enemy projectiles that enter the shield arc
+                    // Silently absorb enemy projectiles that enter the shield arc
                     for (const [pid, p] of this.projs) {
                         if (p.team === shield.team) continue;
-                        const d  = Math.hypot(p.x - shield.x, p.y - shield.y);
+                        const d = Math.hypot(p.x - shield.x, p.y - shield.y);
                         if (d > SHIELD_RADIUS) continue;
                         const angToProj = Math.atan2(p.y - shield.y, p.x - shield.x);
                         let diff = angToProj - shield.a;
                         while (diff >  Math.PI) diff -= Math.PI * 2;
                         while (diff < -Math.PI) diff += Math.PI * 2;
                         if (Math.abs(diff) > SHIELD_HALF_ARC) continue;
-                        // Block it
-                        this.projs.delete(pid);
+                        // Absorb: delete projectile, drain shield HP — no event broadcast
                         shield.hp -= p.dmg * 0.5;
-                        this.events.push({ e: EV.PROJ_DESTROY, i: pid,
-                            sx: Math.round(shield.x), sy: Math.round(shield.y),
-                            px: Math.round(p.x), py: Math.round(p.y) });
+                        this.projs.delete(pid);
                     }
                 }
             }
@@ -3151,6 +3156,23 @@
                 } else if (data.t === 'ability' && room) {
                     const player = room.players.get(id);
                     if (player) room.handleAbility(player);
+
+                // ── Scout drone fire (Daemon operator) ───────────────────────
+                } else if (data.t === 'drone_fire' && room) {
+                    const player = room.players.get(id);
+                    if (!player || room.phase !== PH.ATTACK) return;
+                    const drone = room.scoutDrones?.get(data.id);
+                    // Validate drone belongs to this player's team
+                    if (drone && drone.ownerId === id && drone.team === player.team) {
+                        const x = clamp(+(data.x) || drone.x, 0, room.mapW || 3200);
+                        const y = clamp(+(data.y) || drone.y, 0, room.mapH || 2400);
+                        const a = +(data.a) || drone.a;
+                        // Update drone position to client-reported value (player controls it)
+                        drone.x = x; drone.y = y; drone.a = a;
+                        room.spawnProjectile(x, y, a, player.team, id, {
+                            spd: 600, dmg: 6, r: 3, life: 0.7, pt: 'bgm_scout_mg',
+                        });
+                    }
 
                 } else if (data.t === 'ready' && room) {
                     const player = room.players.get(id);
