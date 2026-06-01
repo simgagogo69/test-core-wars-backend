@@ -199,6 +199,10 @@
         ABILITY_USED   : 20,   // a player activated their active ability
         ABILITY_READY  : 21,   // player's ability cooldown expired (server tells client)
         SUPP_DEVICE    : 22,   // Duster deploys a suppression device
+        REPAIR_DRONE   : 23,   // Orion deploys a repair drone
+        SCOUT_DRONE    : 24,   // Daemon launches a scout drone
+        SHIELD_EMITTER : 25,   // Konig projects a stationary energy shield
+        PINCER_DASH    : 26,   // Blackjack dash — tells clients to render trail
     };
 
     // ─── Turret upgrade tree ──────────────────────────────────────────────────────
@@ -676,6 +680,179 @@
                 return { abilityId: 'combat_stim', duration: 4, stimmed };
             },
         },
+
+        // ── BGM CORP OPERATOR ABILITIES ───────────────────────────────────────────
+
+        // BLACKJACK (BGM Breacher) — pincer dash
+        'pincer_rush': {
+            id: 'pincer_rush', name: 'Pincer Rush',
+            desc: 'Charges forward with beetle pincers, damaging enemies and structures on contact.',
+            cooldown: 12, duration: 0,
+            handler(room, player) {
+                const DASH_DIST   = 180;
+                const DASH_DMG    = 55;
+                const DASH_RADIUS = 22;
+                const steps       = 8;
+                const stepDist    = DASH_DIST / steps;
+                const dx          = Math.cos(player.a);
+                const dy          = Math.sin(player.a);
+                const hitPlayers  = new Set();
+                const hitBuilds   = new Set();
+                // Walk along dash path, deal damage to anything hit
+                for (let s = 1; s <= steps; s++) {
+                    const cx = player.x + dx * stepDist * s;
+                    const cy = player.y + dy * stepDist * s;
+                    for (const p of room.players.values()) {
+                        if (p.id === player.id || p.team === player.team || p.rt > 0) continue;
+                        if (hitPlayers.has(p.id)) continue;
+                        if (Math.hypot(p.x - cx, p.y - cy) <= DASH_RADIUS + 14) {
+                            hitPlayers.add(p.id);
+                            p.hp -= DASH_DMG;
+                            if (p.hp <= 0) {
+                                p.hp = 0; p.rt = 3;
+                                room.events.push({ e: EV.PLAYER_DIE, i: p.id });
+                            } else {
+                                room.events.push({ e: EV.PLAYER_HIT, i: p.id, hp: p.hp });
+                            }
+                        }
+                    }
+                    for (const [bid, b] of room.buildings) {
+                        if (b.team === player.team || hitBuilds.has(bid)) continue;
+                        if (Math.hypot(b.x - cx, b.y - cy) <= DASH_RADIUS + 20) {
+                            hitBuilds.add(bid);
+                            b.hp -= DASH_DMG;
+                            if (b.hp <= 0) {
+                                b.hp = 0;
+                                room.buildings.delete(bid);
+                                room.events.push({ e: EV.BUILD_DESTROY, i: bid });
+                            } else {
+                                room.events.push({ e: EV.BUILD_HIT, i: bid, hp: b.hp });
+                            }
+                        }
+                    }
+                }
+                // Teleport player to end of dash
+                const endX = Math.max(player.r, Math.min(room.mapW || 3200, player.x + dx * DASH_DIST));
+                const endY = Math.max(player.r, Math.min(room.mapH || 2400, player.y + dy * DASH_DIST));
+                player.x = endX;
+                player.y = endY;
+                // Broadcast dash trail VFX
+                room.events.push({
+                    e: EV.PINCER_DASH,
+                    i: player.id,
+                    sx: Math.round(player.x - dx * DASH_DIST),
+                    sy: Math.round(player.y - dy * DASH_DIST),
+                    ex: Math.round(player.x),
+                    ey: Math.round(player.y),
+                });
+                return { abilityId: 'pincer_rush', duration: 0 };
+            },
+        },
+
+        // ORION (BGM Engineer) — hovering repair drone
+        'repair_drone': {
+            id: 'repair_drone', name: 'Repair Drone',
+            desc: 'Deploys a hovering drone that repairs nearby allies and structures.',
+            cooldown: 22, duration: 8,
+            handler(room, player) {
+                const droneId = shortId();
+                const dur     = 8;
+                if (!room.repairDrones) room.repairDrones = new Map();
+                room.repairDrones.set(droneId, {
+                    id: droneId, x: player.x, y: player.y,
+                    team: player.team, expiresAt: Date.now() + dur * 1000,
+                    lastRepair: Date.now(), orbitAngle: 0,
+                });
+                room.events.push({
+                    e: EV.REPAIR_DRONE, id: droneId,
+                    x: Math.round(player.x), y: Math.round(player.y),
+                    tm: player.team, dur,
+                });
+                return { abilityId: 'repair_drone', duration: dur };
+            },
+        },
+
+        // DAEMON (BGM Recon) — scout drone with light MG
+        'scout_drone': {
+            id: 'scout_drone', name: 'Scout Drone',
+            desc: 'Launches a scout drone that flies forward, spots enemies, and fires a light MG.',
+            cooldown: 20, duration: 6,
+            handler(room, player) {
+                const droneId = shortId();
+                const dur     = 6;
+                if (!room.scoutDrones) room.scoutDrones = new Map();
+                room.scoutDrones.set(droneId, {
+                    id: droneId, x: player.x, y: player.y, a: player.a,
+                    team: player.team, ownerId: player.id,
+                    expiresAt: Date.now() + dur * 1000,
+                    lastShot: Date.now(), spd: 90,
+                });
+                room.events.push({
+                    e: EV.SCOUT_DRONE, id: droneId,
+                    x: Math.round(player.x), y: Math.round(player.y),
+                    a: +player.a.toFixed(4), tm: player.team, dur,
+                });
+                return { abilityId: 'scout_drone', duration: dur };
+            },
+        },
+
+        // KASHTAN (BGM Anti-Vehicle) — CIWS auto-attack
+        'overridden_ciws': {
+            id: 'overridden_ciws', name: 'Overridden CIWS',
+            desc: 'Shoulder CIWS and back micromissiles auto-attack the nearest vehicle or enemy for 5 seconds.',
+            cooldown: 22, duration: 5,
+            handler(room, player) {
+                const dur = 5;
+                player.ciwsUntil = Date.now() + dur * 1000;
+                return { abilityId: 'overridden_ciws', duration: dur };
+            },
+        },
+
+        // ODOGARON (BGM Suppression) — flame burst cone
+        'flame_burst': {
+            id: 'flame_burst', name: 'Flame Burst',
+            desc: 'Rapidly spits fire in a wide cone, burning enemies.',
+            cooldown: 16, duration: 1.5,
+            handler(room, player) {
+                const CONE_HALF = 0.55;  // ~31° each side
+                const rounds    = 20;
+                for (let i = 0; i < rounds; i++) {
+                    const spread = (Math.random() - 0.5) * CONE_HALF * 2;
+                    setTimeout(() => {
+                        if (!room.players.has(player.id)) return;
+                        room.spawnProjectile(player.x, player.y, player.a + spread, player.team, player.id, {
+                            spd: 320, dmg: 12, r: 5, life: 0.9,
+                            burn: true, pt: 'bgm_flame',
+                        });
+                    }, i * 75);
+                }
+                return { abilityId: 'flame_burst', duration: 1.5 };
+            },
+        },
+
+        // KONIG (BGM Support) — stationary energy shield
+        'shield_emitter': {
+            id: 'shield_emitter', name: 'Shield Emitter',
+            desc: 'Projects a stationary energy shield that blocks incoming fire.',
+            cooldown: 20, duration: 5,
+            handler(room, player) {
+                const shieldId = shortId();
+                const dur      = 5;
+                if (!room.shieldEmitters) room.shieldEmitters = new Map();
+                room.shieldEmitters.set(shieldId, {
+                    id: shieldId, x: player.x, y: player.y, a: player.a,
+                    team: player.team, expiresAt: Date.now() + dur * 1000,
+                    hp: 200, maxHp: 200,
+                    // Shield arc: blocks projectiles within ±60° of facing angle, within 80px
+                });
+                room.events.push({
+                    e: EV.SHIELD_EMITTER, id: shieldId,
+                    x: Math.round(player.x), y: Math.round(player.y),
+                    a: +player.a.toFixed(4), tm: player.team, dur,
+                });
+                return { abilityId: 'shield_emitter', duration: dur };
+            },
+        },
     };
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -757,40 +934,40 @@
         },
         // ── BGM Operators ─────────────────────────────────────────────────────
         'bgm_breacher': {
-            id: 'bgm_breacher', displayName: 'Slag Runner', faction: 'bgm', role: 'breacher',
+            id: 'bgm_breacher', displayName: 'Blackjack', faction: 'bgm', role: 'breacher',
             allowedWeapons: ROLE_WEAPON_POOLS.breacher,
-            abilityId: 'speed_boost',
-            desc: 'Industrial breacher. Charges through fortifications.',
+            abilityId: 'pincer_rush',
+            desc: 'Frontline defense killer. Charges through enemies and structures with powerful stag beetle pincers.',
         },
         'bgm_engineer': {
-            id: 'bgm_engineer', displayName: 'Rigger', faction: 'bgm', role: 'engineer',
+            id: 'bgm_engineer', displayName: 'Orion', faction: 'bgm', role: 'engineer',
             allowedWeapons: ROLE_WEAPON_POOLS.engineer,
-            abilityId: null,
-            desc: 'Mines specialist. Places heavy structures faster.',
+            abilityId: 'repair_drone',
+            desc: 'Industrial support specialist. Deploys a hovering repair drone to automatically restore allies and structures.',
         },
         'bgm_recon': {
-            id: 'bgm_recon', displayName: 'Surveyor', faction: 'bgm', role: 'recon',
+            id: 'bgm_recon', displayName: 'Daemon', faction: 'bgm', role: 'recon',
             allowedWeapons: ROLE_WEAPON_POOLS.recon,
-            abilityId: null,
-            desc: 'Survey team scout. Marks terrain and enemy positions.',
+            abilityId: 'scout_drone',
+            desc: 'Sharp angular scout. Launches a flying drone that spots enemies and harasses with a light MG.',
         },
         'bgm_anti_vehicle': {
-            id: 'bgm_anti_vehicle', displayName: 'Foreman', faction: 'bgm', role: 'anti_vehicle',
+            id: 'bgm_anti_vehicle', displayName: 'Kashtan', faction: 'bgm', role: 'anti_vehicle',
             allowedWeapons: ROLE_WEAPON_POOLS.anti_vehicle,
-            abilityId: null,
-            desc: 'Heavy equipment operator. Industrial-grade anti-armor pressure.',
+            abilityId: 'overridden_ciws',
+            desc: 'Anti-armor destroyer. Overrides shoulder CIWS and back micromissiles to shred the nearest vehicle or enemy.',
         },
         'bgm_suppression': {
-            id: 'bgm_suppression', displayName: 'Excavator', faction: 'bgm', role: 'suppression',
+            id: 'bgm_suppression', displayName: 'Odogaron', faction: 'bgm', role: 'suppression',
             allowedWeapons: ROLE_WEAPON_POOLS.suppression,
-            abilityId: null,
-            desc: 'Digs in and suppresses with industrial-grade firepower.',
+            abilityId: 'flame_burst',
+            desc: 'Predator-like area denial. Spits fire in a wide burning cone.',
         },
         'bgm_support': {
-            id: 'bgm_support', displayName: 'Quartermaster', faction: 'bgm', role: 'support',
+            id: 'bgm_support', displayName: 'Konig', faction: 'bgm', role: 'support',
             allowedWeapons: ROLE_WEAPON_POOLS.support,
-            abilityId: null,
-            desc: 'Resource conduit. Keeps the front line supplied.',
+            abilityId: 'shield_emitter',
+            desc: 'Command robot. Projects a stationary energy shield that blocks incoming fire.',
         },
         // ── EPA Operators ─────────────────────────────────────────────────────
         'epa_breacher': {
@@ -1165,7 +1342,10 @@
             this.buildings.clear();
             this.projs.clear();
             this.vehicles.clear();
-            if (this.suppDevices) this.suppDevices.clear();
+            if (this.suppDevices)    this.suppDevices.clear();
+            if (this.repairDrones)   this.repairDrones.clear();
+            if (this.scoutDrones)    this.scoutDrones.clear();
+            if (this.shieldEmitters) this.shieldEmitters.clear();
 
             this._prevPhase    = -1;
             this._prevTimer    = -1;
@@ -1432,6 +1612,7 @@
                 abilityCooldown:  0,       // server timestamp when cooldown expires
                 speedBoostUntil:  0,       // speed_boost / phantom_rush / combat_stim
                 invisibleUntil:   0,       // phantom_rush: client renders transparent
+                ciwsUntil:        0,       // overridden_ciws: auto-attack end time
             });
 
             ws.send(JSON.stringify({
@@ -1539,7 +1720,10 @@
             this.buildings.clear();
             this.projs.clear();
             this.vehicles.clear();
-            if (this.suppDevices) this.suppDevices.clear();
+            if (this.suppDevices)    this.suppDevices.clear();
+            if (this.repairDrones)   this.repairDrones.clear();
+            if (this.scoutDrones)    this.scoutDrones.clear();
+            if (this.shieldEmitters) this.shieldEmitters.clear();
 
             this._prevPhase   = -1;
             this._prevTimer   = -1;
@@ -2286,6 +2470,137 @@
                                             sx: Math.round(b.x), sy: Math.round(b.y),
                                             px: Math.round(p.x),  py: Math.round(p.y) });
                         }
+                    }
+                }
+            }
+
+            // ── Repair Drones (Orion ability) ─────────────────────────────────────────
+            if (this.repairDrones && this.repairDrones.size > 0) {
+                const DRONE_REPAIR_RATE = 600;
+                const DRONE_REPAIR_AMT  = 18;
+                const DRONE_RADIUS      = 110;
+                for (const [did, drone] of this.repairDrones) {
+                    if (now >= drone.expiresAt) { this.repairDrones.delete(did); continue; }
+                    if (now - drone.lastRepair < DRONE_REPAIR_RATE) continue;
+                    drone.lastRepair = now;
+                    for (const p of this.players.values()) {
+                        if (p.team !== drone.team || p.rt > 0 || p.hp >= p.maxHp) continue;
+                        if (Math.hypot(p.x - drone.x, p.y - drone.y) <= DRONE_RADIUS) {
+                            p.hp = Math.min(p.maxHp, p.hp + DRONE_REPAIR_AMT);
+                            this.events.push({ e: EV.PLAYER_HIT, i: p.id, hp: p.hp });
+                        }
+                    }
+                    for (const b of this.buildings.values()) {
+                        if (b.team !== drone.team || b.hp >= b.maxHp) continue;
+                        if (Math.hypot(b.x - drone.x, b.y - drone.y) <= DRONE_RADIUS) {
+                            b.hp = Math.min(b.maxHp, b.hp + DRONE_REPAIR_AMT);
+                            this.events.push({ e: EV.BUILD_HIT, i: b.id, hp: b.hp });
+                        }
+                    }
+                }
+            }
+
+            // ── Scout Drones (Daemon ability) ─────────────────────────────────────────
+            if (this.scoutDrones && this.scoutDrones.size > 0) {
+                const DRONE_FIRE_RATE = 350;
+                const DRONE_RANGE     = 200;
+                for (const [did, drone] of this.scoutDrones) {
+                    if (now >= drone.expiresAt) { this.scoutDrones.delete(did); continue; }
+                    // Advance drone forward
+                    drone.x += Math.cos(drone.a) * drone.spd * dt;
+                    drone.y += Math.sin(drone.a) * drone.spd * dt;
+                    drone.x = Math.max(20, Math.min((this.mapW || 3200) - 20, drone.x));
+                    drone.y = Math.max(20, Math.min((this.mapH || 2400) - 20, drone.y));
+                    // Find nearest enemy and steer
+                    let closest = this.findClosestEnemy(drone.x, drone.y, drone.team, DRONE_RANGE);
+                    if (closest) drone.a = Math.atan2(closest.y - drone.y, closest.x - drone.x);
+                    // Fire light MG at enemy
+                    if (closest && now - drone.lastShot >= DRONE_FIRE_RATE) {
+                        drone.lastShot = now;
+                        this.spawnProjectile(drone.x, drone.y, drone.a, drone.team, drone.ownerId, {
+                            spd: 580, dmg: 6, r: 3, life: 0.8,
+                            pt: 'bgm_scout_mg',
+                        });
+                    }
+                }
+            }
+
+            // ── Overridden CIWS (Kashtan ability) ─────────────────────────────────────
+            if (this.phase === PH.ATTACK) {
+                for (const player of this.players.values()) {
+                    if (!player.ciwsUntil || now >= player.ciwsUntil || player.rt > 0) continue;
+                    if (!player._ciwsLastShot) player._ciwsLastShot = 0;
+                    if (!player._ciwsMissile)  player._ciwsMissile  = 0;
+                    // Rapid bullet spray — 80ms per burst of 3
+                    if (now - player._ciwsLastShot >= 80) {
+                        player._ciwsLastShot = now;
+                        // Find closest enemy vehicle or player
+                        let targetX = null, targetY = null, minD = 600;
+                        for (const v of this.vehicles.values()) {
+                            if (v.team === player.team) continue;
+                            const d = Math.hypot(v.x - player.x, v.y - player.y);
+                            if (d < minD) { minD = d; targetX = v.x; targetY = v.y; }
+                        }
+                        for (const p of this.players.values()) {
+                            if (p.team === player.team || p.rt > 0) continue;
+                            const d = Math.hypot(p.x - player.x, p.y - player.y);
+                            if (d < minD) { minD = d; targetX = p.x; targetY = p.y; }
+                        }
+                        if (targetX !== null) {
+                            const baseA = Math.atan2(targetY - player.y, targetX - player.x);
+                            // 3-round CIWS spray with spread
+                            for (let _c = 0; _c < 3; _c++) {
+                                const spread = (Math.random() - 0.5) * 0.3;
+                                this.spawnProjectile(player.x, player.y, baseA + spread, player.team, player.id, {
+                                    spd: 700, dmg: 8, r: 3, life: 0.7, pt: 'bgm_ciws',
+                                });
+                            }
+                        }
+                    }
+                    // Micromissile every 1200ms vs vehicles
+                    if (now - player._ciwsMissile >= 1200) {
+                        player._ciwsMissile = now;
+                        let vTarget = null, minVD = 500;
+                        for (const v of this.vehicles.values()) {
+                            if (v.team === player.team) continue;
+                            const d = Math.hypot(v.x - player.x, v.y - player.y);
+                            if (d < minVD) { minVD = d; vTarget = v; }
+                        }
+                        if (vTarget) {
+                            const mA = Math.atan2(vTarget.y - player.y, vTarget.x - player.x);
+                            this.spawnProjectile(player.x, player.y, mA, player.team, player.id, {
+                                spd: 460, dmg: 38, r: 6, life: 1.2,
+                                splash: 40, bonusVsBldg: true, pt: 'bgm_micromissile',
+                            });
+                        }
+                    }
+                }
+            }
+
+            // ── Shield Emitters (Konig ability) ───────────────────────────────────────
+            if (this.shieldEmitters && this.shieldEmitters.size > 0 && this.phase === PH.ATTACK) {
+                const SHIELD_HALF_ARC = Math.PI / 3;  // ±60°
+                const SHIELD_RADIUS   = 90;
+                for (const [sid, shield] of this.shieldEmitters) {
+                    if (now >= shield.expiresAt || shield.hp <= 0) {
+                        this.shieldEmitters.delete(sid); continue;
+                    }
+                    // Intercept enemy projectiles that enter the shield arc
+                    for (const [pid, p] of this.projs) {
+                        if (p.team === shield.team) continue;
+                        const d  = Math.hypot(p.x - shield.x, p.y - shield.y);
+                        if (d > SHIELD_RADIUS) continue;
+                        const angToProj = Math.atan2(p.y - shield.y, p.x - shield.x);
+                        let diff = angToProj - shield.a;
+                        while (diff >  Math.PI) diff -= Math.PI * 2;
+                        while (diff < -Math.PI) diff += Math.PI * 2;
+                        if (Math.abs(diff) > SHIELD_HALF_ARC) continue;
+                        // Block it
+                        this.projs.delete(pid);
+                        shield.hp -= p.dmg * 0.5;
+                        this.events.push({ e: EV.PROJ_DESTROY, i: pid,
+                            sx: Math.round(shield.x), sy: Math.round(shield.y),
+                            px: Math.round(p.x), py: Math.round(p.y) });
                     }
                 }
             }
