@@ -685,75 +685,33 @@
 
         // ── BGM CORP OPERATOR ABILITIES ───────────────────────────────────────────
 
-        // BLACKJACK (BGM Breacher) — pincer dash
+        // BLACKJACK (BGM Breacher) — pincer dash (tick-loop driven, smooth)
         'pincer_rush': {
             id: 'pincer_rush', name: 'Pincer Rush',
-            desc: 'Charges in the aimed direction with beetle pincers, steering with A/D. Damages enemies and structures on contact.',
-            cooldown: 14, duration: 2,
+            desc: 'Charges in the aimed direction, A/D to steer mid-dash. Damages enemies and structures.',
+            cooldown: 14, duration: 1.1,
             handler(room, player) {
-                const DASH_DIST   = 280;
-                const DASH_DMG    = 55;
-                const DASH_RADIUS = 22;
-                const DASH_DUR    = 1100; // ms — 1.1 seconds
-                const steps       = 22;   // step every ~50ms
-                const hitPlayers  = new Set();
-                const hitBuilds   = new Set();
+                const DASH_DIST = 280;
+                const DASH_DUR  = 1100; // ms
+                const DASH_SPD  = (DASH_DIST / DASH_DUR) * 1000; // px/s ≈ 254
 
-                // Latch starting direction from player's current aim (mouse direction)
-                let dashA = player.a;
-                const startX = player.x;
-                const startY = player.y;
+                // Latch initial direction from player aim (= mouse direction)
+                player.dashUntil      = Date.now() + DASH_DUR;
+                player.dashAngle      = player.a;
+                player.dashSpd        = DASH_SPD;
+                player._dashHitPlayers = new Set();
+                player._dashHitBuilds  = new Set();
 
-                // Compute end point at latch time (for trail VFX start)
-                const previewEndX = Math.max(player.r, Math.min(MAP_W - player.r, startX + Math.cos(dashA) * DASH_DIST));
-                const previewEndY = Math.max(player.r, Math.min(MAP_H - player.r, startY + Math.sin(dashA) * DASH_DIST));
-
+                // Broadcast immediately so client can start its smooth prediction
                 room.events.push({
                     e: EV.PINCER_DASH, i: player.id,
-                    sx: Math.round(startX), sy: Math.round(startY),
-                    ex: Math.round(previewEndX), ey: Math.round(previewEndY),
+                    sx: Math.round(player.x), sy: Math.round(player.y),
+                    // Preview end: straight ahead, will curve if player steers
+                    ex: Math.round(Math.max(player.r, Math.min(MAP_W - player.r, player.x + Math.cos(player.a) * DASH_DIST))),
+                    ey: Math.round(Math.max(player.r, Math.min(MAP_H - player.r, player.y + Math.sin(player.a) * DASH_DIST))),
+                    a: +player.a.toFixed(4),
                     dur: DASH_DUR,
                 });
-
-                player.dashing = true;
-                const STEP_DIST = DASH_DIST / steps;
-                const STEER_RATE = 0.06; // radians per step A/D can steer
-
-                for (let s = 1; s <= steps; s++) {
-                    const delay = ((s / steps) * DASH_DUR) | 0;
-                    setTimeout(() => {
-                        if (!room.players.has(player.id)) return;
-                        // Apply A/D steering: player.inp.dx is -1/0/+1 (left/none/right)
-                        dashA += (player.inp.dx || 0) * STEER_RATE;
-                        // Move forward in current dash direction
-                        const nx = Math.max(player.r, Math.min(MAP_W - player.r, player.x + Math.cos(dashA) * STEP_DIST));
-                        const ny = Math.max(player.r, Math.min(MAP_H - player.r, player.y + Math.sin(dashA) * STEP_DIST));
-                        player.x = nx;
-                        player.y = ny;
-
-                        // Damage sweep
-                        for (const p of room.players.values()) {
-                            if (p.id === player.id || p.team === player.team || p.rt > 0) continue;
-                            if (hitPlayers.has(p.id)) continue;
-                            if (Math.hypot(p.x - player.x, p.y - player.y) <= DASH_RADIUS + 14) {
-                                hitPlayers.add(p.id);
-                                p.hp -= DASH_DMG;
-                                if (p.hp <= 0) { p.hp = 0; p.rt = 3; room.events.push({ e: EV.PLAYER_DIE, i: p.id }); }
-                                else room.events.push({ e: EV.PLAYER_HIT, i: p.id, hp: p.hp });
-                            }
-                        }
-                        for (const [bid, b] of room.buildings) {
-                            if (b.team === player.team || hitBuilds.has(bid)) continue;
-                            if (Math.hypot(b.x - player.x, b.y - player.y) <= DASH_RADIUS + 20) {
-                                hitBuilds.add(bid);
-                                b.hp -= DASH_DMG;
-                                if (b.hp <= 0) { b.hp = 0; room.buildings.delete(bid); room.events.push({ e: EV.BUILD_DESTROY, i: bid }); }
-                                else room.events.push({ e: EV.BUILD_HIT, i: bid, hp: b.hp });
-                            }
-                        }
-                        if (s === steps) player.dashing = false;
-                    }, delay);
-                }
                 return { abilityId: 'pincer_rush', duration: 1.1 };
             },
         },
@@ -823,17 +781,19 @@
             desc: 'Rapidly spits fire in a wide cone, burning enemies.',
             cooldown: 16, duration: 1.5,
             handler(room, player) {
-                const CONE_HALF = 0.55;  // ~31° each side
-                const rounds    = 20;
+                const CONE_HALF = 0.52;   // ~30° each side
+                const rounds    = 24;
                 for (let i = 0; i < rounds; i++) {
+                    // Randomise spread per round, not sequential — avoids two fireballs on same line
                     const spread = (Math.random() - 0.5) * CONE_HALF * 2;
+                    const delay  = i * 60; // 60ms between rounds → 1.44s burst
                     setTimeout(() => {
                         if (!room.players.has(player.id)) return;
                         room.spawnProjectile(player.x, player.y, player.a + spread, player.team, player.id, {
-                            spd: 420, dmg: 14, r: 8, life: 1.1,
+                            spd: 360, dmg: 14, r: 8, life: 1.1,
                             burn: true, pt: 'bgm_flame',
                         });
-                    }, i * 75);
+                    }, delay);
                 }
                 return { abilityId: 'flame_burst', duration: 1.5 };
             },
@@ -1622,6 +1582,11 @@
                 speedBoostUntil:  0,       // speed_boost / phantom_rush / combat_stim
                 invisibleUntil:   0,       // phantom_rush: client renders transparent
                 ciwsUntil:        0,       // overridden_ciws: auto-attack end time
+                dashUntil:        0,       // pincer_rush: dash end timestamp
+                dashAngle:        0,       // pincer_rush: current dash direction (steerable)
+                dashSpd:          0,       // pincer_rush: dash speed px/s
+                _dashHitPlayers:  null,    // pincer_rush: hit-dedup set (lives on player)
+                _dashHitBuilds:   null,
             });
 
             ws.send(JSON.stringify({
@@ -1825,6 +1790,9 @@
                         player.hp = player.maxHp;
                         player.burnUntil = 0;
                         player._lastBurnTick = 0;
+                        // Clear any active dash
+                        player.dashUntil = 0; player.dashSpd = 0;
+                        player._dashHitPlayers = null; player._dashHitBuilds = null;
                         const spawn = this.mapDef.spawns[player.team];
                         player.x  = spawn.x;
                         player.y  = spawn.y;
@@ -1866,6 +1834,47 @@
 
                 let nx = player.x + player.inp.dx * player.spd * (player.slowUntil > now ? 0.4 : (player.speedBoostUntil > now ? 2.0 : 1.0)) * dt;
                 let ny = player.y + player.inp.dy * player.spd * (player.slowUntil > now ? 0.4 : (player.speedBoostUntil > now ? 2.0 : 1.0)) * dt;
+
+                // ── Pincer Rush dash override ──────────────────────────────────────────────
+                if (player.dashUntil > now) {
+                    const STEER_RATE = 1.8; // rad/s max steering
+                    player.dashAngle += (player.inp.dx || 0) * STEER_RATE * dt;
+                    nx = player.x + Math.cos(player.dashAngle) * player.dashSpd * dt;
+                    ny = player.y + Math.sin(player.dashAngle) * player.dashSpd * dt;
+                    nx = clamp(nx, player.r, MAP_W - player.r);
+                    ny = clamp(ny, player.r, MAP_H - player.r);
+
+                    // Damage sweep each tick while dashing
+                    const _hp = player._dashHitPlayers || (player._dashHitPlayers = new Set());
+                    const _hb = player._dashHitBuilds  || (player._dashHitBuilds  = new Set());
+                    const DASH_DMG = 55, DASH_R = 22;
+                    for (const p of this.players.values()) {
+                        if (p.id === player.id || p.team === player.team || p.rt > 0 || _hp.has(p.id)) continue;
+                        if (Math.hypot(p.x - nx, p.y - ny) <= DASH_R + 14) {
+                            _hp.add(p.id);
+                            p.hp -= DASH_DMG;
+                            if (p.hp <= 0) { p.hp = 0; p.rt = 3; this.events.push({ e: EV.PLAYER_DIE, i: p.id }); }
+                            else this.events.push({ e: EV.PLAYER_HIT, i: p.id, hp: p.hp });
+                        }
+                    }
+                    for (const [bid, b] of this.buildings) {
+                        if (b.team === player.team || _hb.has(bid)) continue;
+                        if (Math.hypot(b.x - nx, b.y - ny) <= DASH_R + 20) {
+                            _hb.add(bid);
+                            b.hp -= DASH_DMG;
+                            if (b.hp <= 0) { b.hp = 0; this.buildings.delete(bid); this.events.push({ e: EV.BUILD_DESTROY, i: bid }); }
+                            else this.events.push({ e: EV.BUILD_HIT, i: bid, hp: b.hp });
+                        }
+                    }
+                    player.x = nx;
+                    player.y = ny;
+                    continue; // skip normal movement, wall collision, etc. while dashing
+                }
+                if (player.dashUntil && player.dashUntil <= now) {
+                    // Dash just ended — clean up
+                    player.dashUntil = 0; player.dashSpd = 0;
+                    player._dashHitPlayers = null; player._dashHitBuilds = null;
+                }
 
                 const mid = MAP_W / 2;
                 let minX  = player.r;
