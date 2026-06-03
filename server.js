@@ -205,6 +205,10 @@
         PINCER_DASH    : 26,   // Blackjack dash — tells clients to render trail
         DRONE_HIT      : 27,   // Scout/repair drone took damage
         DRONE_DESTROY  : 28,   // Scout/repair drone destroyed
+        // ── EPA Operator events ─────────────────────────────────────────────────
+        PLASMA_DASH        : 29,   // Hellhound dash trail VFX
+        REPAIR_BAY         : 30,   // Velarus deploys repair bay (wall + repair device)
+        RESTORATION_FIELD  : 31,   // Caesarium creates a healing restoration field
     };
 
     // ─── Turret upgrade tree ──────────────────────────────────────────────────────
@@ -822,7 +826,138 @@
                 return { abilityId: 'shield_emitter', duration: dur };
             },
         },
-    };
+
+        // ── EPA OPERATOR ABILITIES ─────────────────────────────────────────────────
+
+        // HELLHOUND (EPA Breacher) — forward plasma dash, damages enemies in path
+        'plasma_dash': {
+            id: 'plasma_dash', name: 'Plasma Dash',
+            desc: 'Dashes forward rapidly while damaging enemies and structures passed through.',
+            cooldown: 14, duration: 0.8,
+            handler(room, player) {
+                const DASH_DIST = 240;
+                const DASH_DUR  = 800;  // ms
+                const DASH_SPD  = (DASH_DIST / DASH_DUR) * 1000; // px/s ≈ 300
+
+                player.dashUntil       = Date.now() + DASH_DUR;
+                player.dashAngle       = player.a;
+                player.dashSpd         = DASH_SPD;
+                player._dashHitPlayers = new Set();
+                player._dashHitBuilds  = new Set();
+
+                room.events.push({
+                    e: EV.PLASMA_DASH, i: player.id,
+                    sx: Math.round(player.x), sy: Math.round(player.y),
+                    ex: Math.round(Math.max(player.r, Math.min(MAP_W - player.r, player.x + Math.cos(player.a) * DASH_DIST))),
+                    ey: Math.round(Math.max(player.r, Math.min(MAP_H - player.r, player.y + Math.sin(player.a) * DASH_DIST))),
+                    a: +player.a.toFixed(4), dur: DASH_DUR, tm: player.team,
+                });
+                return { abilityId: 'plasma_dash', duration: 0.8 };
+            },
+        },
+
+        // VELARUS (EPA Engineer) — deploys a temporary repair wall + repair device
+        'repair_bay': {
+            id: 'repair_bay', name: 'Repair Bay',
+            desc: 'Creates a temporary wall that blocks projectiles, with a device behind it that repairs nearby vehicles and structures.',
+            cooldown: 24, duration: 8,
+            handler(room, player) {
+                const dur   = 8;
+                const bayId = shortId();
+                // Place repair bay in front of player
+                const WALL_DIST = 55;
+                const bx = player.x + Math.cos(player.a) * WALL_DIST;
+                const by = player.y + Math.sin(player.a) * WALL_DIST;
+                if (!room.repairBays) room.repairBays = new Map();
+                room.repairBays.set(bayId, {
+                    id: bayId, x: bx, y: by, a: player.a,
+                    team: player.team, expiresAt: Date.now() + dur * 1000,
+                    lastRepair: Date.now(),
+                });
+                room.events.push({
+                    e: EV.REPAIR_BAY, id: bayId,
+                    x: Math.round(bx), y: Math.round(by),
+                    a: +player.a.toFixed(4), tm: player.team, dur,
+                });
+                return { abilityId: 'repair_bay', duration: dur };
+            },
+        },
+
+        // EXCELSIOR (EPA Recon) — volley of micro homing missiles vs recently-damaged enemies
+        'micro_missile_swarm': {
+            id: 'micro_missile_swarm', name: 'Micro Missile Swarm',
+            desc: 'Launches a volley of small homing missiles that prioritize recently damaged enemies.',
+            cooldown: 18, duration: 0,
+            handler(room, player) {
+                const missiles = 6;
+                const aRef = player.a;
+                for (let i = 0; i < missiles; i++) {
+                    const spread = (i - (missiles - 1) / 2) * 0.13;
+                    const delay  = i * 90;
+                    setTimeout(() => {
+                        if (!room.players.has(player.id)) return;
+                        room.spawnProjectile(player.x, player.y, aRef + spread, player.team, player.id, {
+                            spd: 540, dmg: 32, r: 5, life: 2.2,
+                            splash: 38, bonusVsBldg: true,
+                            pt: 'epa_micromissile',
+                        });
+                    }, delay);
+                }
+                return { abilityId: 'micro_missile_swarm', duration: 0 };
+            },
+        },
+
+        // MORNING STAR (EPA Anti-Vehicle) — high-speed piercing rail round
+        'rail_shot': {
+            id: 'rail_shot', name: 'Rail Shot',
+            desc: 'Charges and fires a high-speed piercing projectile effective against vehicles and structures.',
+            cooldown: 16, duration: 0,
+            handler(room, player) {
+                room.spawnProjectile(player.x, player.y, player.a, player.team, player.id, {
+                    spd: 1400, dmg: 115, r: 6, life: 2.5,
+                    pierce: true, bonusVsBldg: true,
+                    pt: 'epa_rail',
+                });
+                return { abilityId: 'rail_shot', duration: 0 };
+            },
+        },
+
+        // DRAKE (EPA Suppression) — sustained dual machine gun arm spray
+        'machine_gun_arms': {
+            id: 'machine_gun_arms', name: 'Machine Gun Arms',
+            desc: 'Fires a suppressive machine gun spray with dual machine gun arms, wherever the player is aiming.',
+            cooldown: 14, duration: 3,
+            handler(room, player) {
+                const dur = 3;
+                player.machineGunArmsUntil = Date.now() + dur * 1000;
+                player._mgaLastShot = 0;
+                return { abilityId: 'machine_gun_arms', duration: dur };
+            },
+        },
+
+        // CAESARIUM (EPA Support) — area restoration field that heals nearby allies
+        'restoration_field': {
+            id: 'restoration_field', name: 'Restoration Field',
+            desc: 'Creates an area that slowly heals nearby allies.',
+            cooldown: 24, duration: 6,
+            handler(room, player) {
+                const dur     = 6;
+                const fieldId = shortId();
+                if (!room.restorationFields) room.restorationFields = new Map();
+                room.restorationFields.set(fieldId, {
+                    id: fieldId, x: player.x, y: player.y,
+                    team: player.team, expiresAt: Date.now() + dur * 1000,
+                    lastHeal: Date.now(),
+                });
+                room.events.push({
+                    e: EV.RESTORATION_FIELD, id: fieldId,
+                    x: Math.round(player.x), y: Math.round(player.y),
+                    tm: player.team, dur,
+                });
+                return { abilityId: 'restoration_field', duration: dur };
+            },
+        },
+    };  // end ABILITY_DEFS
 
     // ═══════════════════════════════════════════════════════════════════════════
     // OPERATOR DEFINITIONS
@@ -940,40 +1075,40 @@
         },
         // ── EPA Operators ─────────────────────────────────────────────────────
         'epa_breacher': {
-            id: 'epa_breacher', displayName: 'Aegis Vanguard', faction: 'epa', role: 'breacher',
+            id: 'epa_breacher', displayName: 'Hellhound', faction: 'epa', role: 'breacher',
             allowedWeapons: ROLE_WEAPON_POOLS.breacher,
-            abilityId: 'speed_boost',
-            desc: 'Precision entry. EPA-issue breach protocol enables rapid advance.',
+            abilityId: 'plasma_dash',
+            desc: 'Frontline defense killer. Plasma Dash propels the sleek assault frame through enemy lines at plasma speed, scorching everything it passes through.',
         },
         'epa_engineer': {
-            id: 'epa_engineer', displayName: 'Systems Tech', faction: 'epa', role: 'engineer',
+            id: 'epa_engineer', displayName: 'Velarus', faction: 'epa', role: 'engineer',
             allowedWeapons: ROLE_WEAPON_POOLS.engineer,
-            abilityId: null,
-            desc: 'Field technician. Optimizes EPA defensive systems.',
+            abilityId: 'repair_bay',
+            desc: 'Vehicle and turret repair specialist. Repair Bay deploys a protective wall with a construction emitter that restores nearby friendly vehicles and structures.',
         },
         'epa_recon': {
-            id: 'epa_recon', displayName: 'Observer', faction: 'epa', role: 'recon',
+            id: 'epa_recon', displayName: 'Excelsior', faction: 'epa', role: 'recon',
             allowedWeapons: ROLE_WEAPON_POOLS.recon,
-            abilityId: null,
-            desc: 'Long-range surveillance. Pairs with the EPA\'s precision doctrine.',
+            abilityId: 'micro_missile_swarm',
+            desc: 'Vision intel and flank specialist. Micro Missile Swarm deploys orbiting sensor prisms to guide a volley of homing missiles onto recently damaged targets.',
         },
         'epa_anti_vehicle': {
-            id: 'epa_anti_vehicle', displayName: 'Interceptor', faction: 'epa', role: 'anti_vehicle',
+            id: 'epa_anti_vehicle', displayName: 'Morning Star', faction: 'epa', role: 'anti_vehicle',
             allowedWeapons: ROLE_WEAPON_POOLS.anti_vehicle,
-            abilityId: null,
-            desc: 'Vehicle denial. EPA-grade armor-piercing sustained fire.',
+            abilityId: 'rail_shot',
+            desc: 'Anti-tank and mech destroyer. Rail Shot charges the shoulder-mounted rail cannon for a single devastating hypersonic piercing round.',
         },
         'epa_suppression': {
-            id: 'epa_suppression', displayName: 'Bulwark', faction: 'epa', role: 'suppression',
+            id: 'epa_suppression', displayName: 'Drake', faction: 'epa', role: 'suppression',
             allowedWeapons: ROLE_WEAPON_POOLS.suppression,
-            abilityId: null,
-            desc: 'Defensive line-holder. Outranges most infantry weapons.',
+            abilityId: 'machine_gun_arms',
+            desc: 'Area denial and pressure. Machine Gun Arms opens fire with both integrated arm-mounted machine guns in a sustained, wide suppressive spray.',
         },
         'epa_support': {
-            id: 'epa_support', displayName: 'Field Analyst', faction: 'epa', role: 'support',
+            id: 'epa_support', displayName: 'Caesarium', faction: 'epa', role: 'support',
             allowedWeapons: ROLE_WEAPON_POOLS.support,
-            abilityId: null,
-            desc: 'Tactical coordinator. EPA doctrine optimized for team play.',
+            abilityId: 'restoration_field',
+            desc: 'Heal utility and buffing. Restoration Field projects a ring emitter array that slowly restores the health of all nearby allies.',
         },
     };
 
@@ -1582,9 +1717,10 @@
                 speedBoostUntil:  0,       // speed_boost / phantom_rush / combat_stim
                 invisibleUntil:   0,       // phantom_rush: client renders transparent
                 ciwsUntil:        0,       // overridden_ciws: auto-attack end time
-                dashUntil:        0,       // pincer_rush: dash end timestamp
-                dashAngle:        0,       // pincer_rush: current dash direction (steerable)
-                dashSpd:          0,       // pincer_rush: dash speed px/s
+                dashUntil:        0,       // pincer_rush / plasma_dash: dash end timestamp
+                dashAngle:        0,       // pincer_rush / plasma_dash: current dash direction (steerable)
+                dashSpd:          0,       // pincer_rush / plasma_dash: dash speed px/s
+                machineGunArmsUntil: 0,    // machine_gun_arms: spray end time
                 _dashHitPlayers:  null,    // pincer_rush: hit-dedup set (lives on player)
                 _dashHitBuilds:   null,
             });
@@ -2637,6 +2773,73 @@
                             spd: 420, dmg: 7, r: 4, life: 1.3,
                             slow: true, pt: 'supp_field',
                         });
+                    }
+                }
+            }
+
+            // ── Machine Gun Arms (Drake EPA Suppression) ─────────────────────────────
+            if (this.phase === PH.ATTACK) {
+                for (const player of this.players.values()) {
+                    if (!player.machineGunArmsUntil || now >= player.machineGunArmsUntil || player.rt > 0) continue;
+                    if (!player._mgaLastShot) player._mgaLastShot = 0;
+                    // Fire both arms alternately at ~120ms intervals each
+                    if (now - player._mgaLastShot >= 65) {
+                        player._mgaLastShot = now;
+                        const CONE = 0.35;
+                        for (let _arm = 0; _arm < 2; _arm++) {
+                            const spread = (Math.random() - 0.5) * CONE * 2;
+                            const armOffset = (_arm === 0 ? -8 : 8);
+                            const perpA = player.a + Math.PI / 2;
+                            const ox = player.x + Math.cos(perpA) * armOffset;
+                            const oy = player.y + Math.sin(perpA) * armOffset;
+                            this.spawnProjectile(ox, oy, player.a + spread, player.team, player.id, {
+                                spd: 660, dmg: 11, r: 3, life: 0.9, pt: 'epa_mga',
+                            });
+                        }
+                    }
+                }
+            }
+
+            // ── Restoration Fields (Caesarium EPA Support) ───────────────────────────
+            if (this.restorationFields && this.restorationFields.size > 0 && this.phase === PH.ATTACK) {
+                const HEAL_RADIUS   = 160;
+                const HEAL_INTERVAL = 1000;  // ms between heal pulses
+                const HEAL_AMOUNT   = 12;
+                for (const [fid, field] of this.restorationFields) {
+                    if (now >= field.expiresAt) { this.restorationFields.delete(fid); continue; }
+                    if (now - field.lastHeal < HEAL_INTERVAL) continue;
+                    field.lastHeal = now;
+                    for (const p of this.players.values()) {
+                        if (p.team !== field.team || p.rt > 0) continue;
+                        if (Math.hypot(p.x - field.x, p.y - field.y) <= HEAL_RADIUS) {
+                            p.hp = Math.min(p.maxHp, p.hp + HEAL_AMOUNT);
+                            this.events.push({ e: EV.PLAYER_HIT, i: p.id, hp: p.hp });
+                        }
+                    }
+                }
+            }
+
+            // ── Repair Bays (Velarus EPA Engineer) ───────────────────────────────────
+            if (this.repairBays && this.repairBays.size > 0 && this.phase === PH.ATTACK) {
+                const BAY_REPAIR_RADIUS   = 110;
+                const BAY_REPAIR_INTERVAL = 1200;
+                const BAY_REPAIR_AMOUNT   = 28;
+                for (const [bid, bay] of this.repairBays) {
+                    if (now >= bay.expiresAt) { this.repairBays.delete(bid); continue; }
+                    if (now - bay.lastRepair < BAY_REPAIR_INTERVAL) continue;
+                    bay.lastRepair = now;
+                    for (const b of this.buildings.values()) {
+                        if (b.team !== bay.team) continue;
+                        if (Math.hypot(b.x - bay.x, b.y - bay.y) <= BAY_REPAIR_RADIUS) {
+                            b.hp = Math.min(b.maxHp, b.hp + BAY_REPAIR_AMOUNT);
+                            this.events.push({ e: EV.BUILD_HIT, i: b.id, hp: b.hp });
+                        }
+                    }
+                    for (const v of this.vehicles.values()) {
+                        if (v.team !== bay.team) continue;
+                        if (Math.hypot(v.x - bay.x, v.y - bay.y) <= BAY_REPAIR_RADIUS) {
+                            v.hp = Math.min(v.maxHp, v.hp + BAY_REPAIR_AMOUNT);
+                        }
                     }
                 }
             }
