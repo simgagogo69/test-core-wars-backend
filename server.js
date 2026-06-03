@@ -829,30 +829,59 @@
 
         // ── EPA OPERATOR ABILITIES ─────────────────────────────────────────────────
 
-        // HELLHOUND (EPA Breacher) — forward plasma dash, damages enemies in path
+        // HELLHOUND (EPA Breacher) — instant plasma teleport, damages all enemies in path
         'plasma_dash': {
             id: 'plasma_dash', name: 'Plasma Dash',
-            desc: 'Dashes forward rapidly while damaging enemies and structures passed through.',
-            cooldown: 14, duration: 0.8,
+            desc: 'Instantly teleports forward, damaging every enemy and structure passed through.',
+            cooldown: 14, duration: 0,
             handler(room, player) {
-                const DASH_DIST = 240;
-                const DASH_DUR  = 800;  // ms
-                const DASH_SPD  = (DASH_DIST / DASH_DUR) * 1000; // px/s ≈ 300
+                const DASH_DIST = 260;
+                const DASH_DMG  = 65;
+                const DASH_R    = 22;
+                const now       = Date.now();
 
-                player.dashUntil       = Date.now() + DASH_DUR;
-                player.dashAngle       = player.a;
-                player.dashSpd         = DASH_SPD;
-                player._dashHitPlayers = new Set();
-                player._dashHitBuilds  = new Set();
+                const sx = player.x, sy = player.y;
+                const ex = clamp(player.x + Math.cos(player.a) * DASH_DIST, player.r, MAP_W - player.r);
+                const ey = clamp(player.y + Math.sin(player.a) * DASH_DIST, player.r, MAP_H - player.r);
+
+                // Sweep along path in 10 steps to hit everything in the corridor
+                const hitPlayers = new Set(), hitBuilds = new Set();
+                const STEPS = 10;
+                for (let s = 0; s <= STEPS; s++) {
+                    const t = s / STEPS;
+                    const cx = sx + (ex - sx) * t, cy = sy + (ey - sy) * t;
+                    for (const p of room.players.values()) {
+                        if (p.id === player.id || p.team === player.team || p.rt > 0 || hitPlayers.has(p.id)) continue;
+                        if (dist(cx, cy, p.x, p.y) <= DASH_R + p.r) {
+                            hitPlayers.add(p.id);
+                            p.hp -= DASH_DMG;
+                            p.lastDamaged = now;
+                            if (p.hp <= 0) { p.hp = 0; p.rt = 3; room.events.push({ e: EV.PLAYER_DIE, i: p.id }); }
+                            else room.events.push({ e: EV.PLAYER_HIT, i: p.id, hp: p.hp });
+                        }
+                    }
+                    for (const [bid, b] of room.buildings) {
+                        if (b.team === player.team || hitBuilds.has(bid)) continue;
+                        if (dist(cx, cy, b.x, b.y) <= DASH_R + 20) {
+                            hitBuilds.add(bid);
+                            b.hp -= DASH_DMG;
+                            if (b.hp <= 0) { b.hp = 0; room.buildings.delete(bid); room.events.push({ e: EV.BUILD_DESTROY, i: bid }); }
+                            else room.events.push({ e: EV.BUILD_HIT, i: bid, hp: b.hp });
+                        }
+                    }
+                }
+
+                // Instant positional teleport
+                player.x = ex;
+                player.y = ey;
 
                 room.events.push({
                     e: EV.PLASMA_DASH, i: player.id,
-                    sx: Math.round(player.x), sy: Math.round(player.y),
-                    ex: Math.round(Math.max(player.r, Math.min(MAP_W - player.r, player.x + Math.cos(player.a) * DASH_DIST))),
-                    ey: Math.round(Math.max(player.r, Math.min(MAP_H - player.r, player.y + Math.sin(player.a) * DASH_DIST))),
-                    a: +player.a.toFixed(4), dur: DASH_DUR, tm: player.team,
+                    sx: Math.round(sx), sy: Math.round(sy),
+                    ex: Math.round(ex), ey: Math.round(ey),
+                    tm: player.team,
                 });
-                return { abilityId: 'plasma_dash', duration: 0.8 };
+                return { abilityId: 'plasma_dash', duration: 0 };
             },
         },
 
@@ -897,8 +926,9 @@
                     setTimeout(() => {
                         if (!room.players.has(player.id)) return;
                         room.spawnProjectile(player.x, player.y, aRef + spread, player.team, player.id, {
-                            spd: 540, dmg: 32, r: 5, life: 2.2,
+                            spd: 480, dmg: 32, r: 5, life: 3.5,
                             splash: 38, bonusVsBldg: true,
+                            homing: true,
                             pt: 'epa_micromissile',
                         });
                     }, delay);
@@ -907,14 +937,20 @@
             },
         },
 
-        // MORNING STAR (EPA Anti-Vehicle) — high-speed piercing rail round
+        // MORNING STAR (EPA Anti-Vehicle) — high-speed piercing rail round from shoulder cannon
         'rail_shot': {
             id: 'rail_shot', name: 'Rail Shot',
             desc: 'Charges and fires a high-speed piercing projectile effective against vehicles and structures.',
             cooldown: 16, duration: 0,
             handler(room, player) {
-                room.spawnProjectile(player.x, player.y, player.a, player.team, player.id, {
-                    spd: 1400, dmg: 115, r: 6, life: 2.5,
+                // Rail cannon is mounted on the LEFT shoulder — offset perpendicular to aim
+                const perpA  = player.a + Math.PI / 2;  // left side (negative y in local space)
+                const SHOULDER_OFFSET = 14;
+                const ox = player.x + Math.cos(perpA) * -SHOULDER_OFFSET;
+                const oy = player.y + Math.sin(perpA) * -SHOULDER_OFFSET;
+
+                room.spawnProjectile(ox, oy, player.a, player.team, player.id, {
+                    spd: 1600, dmg: 130, r: 8, life: 2.8,
                     pierce: true, bonusVsBldg: true,
                     pt: 'epa_rail',
                 });
@@ -1718,9 +1754,10 @@
                 invisibleUntil:   0,       // phantom_rush: client renders transparent
                 ciwsUntil:        0,       // overridden_ciws: auto-attack end time
                 dashUntil:        0,       // pincer_rush / plasma_dash: dash end timestamp
-                dashAngle:        0,       // pincer_rush / plasma_dash: current dash direction (steerable)
-                dashSpd:          0,       // pincer_rush / plasma_dash: dash speed px/s
+                dashAngle:        0,       // pincer_rush: current dash direction (steerable)
+                dashSpd:          0,       // pincer_rush: dash speed px/s
                 machineGunArmsUntil: 0,    // machine_gun_arms: spray end time
+                lastDamaged:      0,       // timestamp (ms) of last time this player took damage
                 _dashHitPlayers:  null,    // pincer_rush: hit-dedup set (lives on player)
                 _dashHitBuilds:   null,
             });
@@ -1973,8 +2010,9 @@
 
                 // ── Pincer Rush dash override ──────────────────────────────────────────────
                 if (player.dashUntil > now) {
-                    const STEER_RATE = 1.8; // rad/s max steering
-                    player.dashAngle += (player.inp.dx || 0) * STEER_RATE * dt;
+                    const STEER_RATE = 1.8; // rad/s max steering — must match client constant
+                    // Use Math.sign so steering is discrete (-1/0/1), matching the client's key reading
+                    player.dashAngle += Math.sign(player.inp.dx || 0) * STEER_RATE * dt;
                     nx = player.x + Math.cos(player.dashAngle) * player.dashSpd * dt;
                     ny = player.y + Math.sin(player.dashAngle) * player.dashSpd * dt;
                     nx = clamp(nx, player.r, MAP_W - player.r);
@@ -2404,6 +2442,30 @@
                 p.y += Math.sin(p.a) * p.spd * dt;
                 p.life -= dt;
 
+                // ── Homing steering (micro_missile_swarm) ───────────────────────────────
+                if (p.homing && p.life > 0) {
+                    const HOMING_R   = 380;
+                    const TURN_RATE  = 5.5;    // rad/s — very aggressive tracking
+                    const RECENT_WIN = 6000;   // ms window for "recently damaged"
+                    let bestTarget = null, bestScore = 0;
+                    for (const t of this.players.values()) {
+                        if (t.team === p.team || t.rt > 0) continue;
+                        const d = dist(p.x, p.y, t.x, t.y);
+                        if (d > HOMING_R) continue;
+                        // Heavily prioritise recently-damaged targets
+                        const recentBonus = (now - (t.lastDamaged || 0)) < RECENT_WIN ? 3.0 : 1.0;
+                        const score = recentBonus / (d + 1);
+                        if (score > bestScore) { bestScore = score; bestTarget = t; }
+                    }
+                    if (bestTarget) {
+                        const targetA = Math.atan2(bestTarget.y - p.y, bestTarget.x - p.x);
+                        let da = targetA - p.a;
+                        while (da > Math.PI) da -= Math.PI * 2;
+                        while (da < -Math.PI) da += Math.PI * 2;
+                        p.a += Math.sign(da) * Math.min(Math.abs(da), TURN_RATE * dt);
+                    }
+                }
+
                 let dead         = p.life <= 0 || p.x < 0 || p.x > MAP_W || p.y < 0 || p.y > MAP_H;
                 let hitSomething = false;
 
@@ -2413,6 +2475,7 @@
                         if (target.rt > 0 || target.team === p.team) continue;
                         if (dist(p.x, p.y, target.x, target.y) < target.r + p.r) {
                             target.hp -= p.dmg;
+                            target.lastDamaged = now;
                             dead = true; hitSomething = true;
                             if (p.slow) target.slowUntil = now + 650;
                             // Burn: apply DoT for 3 seconds (6 ticks of 5dmg at 500ms)
@@ -2782,16 +2845,22 @@
                 for (const player of this.players.values()) {
                     if (!player.machineGunArmsUntil || now >= player.machineGunArmsUntil || player.rt > 0) continue;
                     if (!player._mgaLastShot) player._mgaLastShot = 0;
-                    // Fire both arms alternately at ~120ms intervals each
+                    // Fire both arms alternately at ~65ms intervals — bullets origin from each arm muzzle
                     if (now - player._mgaLastShot >= 65) {
                         player._mgaLastShot = now;
-                        const CONE = 0.35;
+                        const CONE = 0.28;
+                        const ARM_OUT   = 22;  // lateral distance from body centre to arm
+                        const ARM_FWD   = 14;  // forward reach of arm before muzzle
+                        const perpA = player.a + Math.PI / 2;
                         for (let _arm = 0; _arm < 2; _arm++) {
-                            const spread = (Math.random() - 0.5) * CONE * 2;
-                            const armOffset = (_arm === 0 ? -8 : 8);
-                            const perpA = player.a + Math.PI / 2;
-                            const ox = player.x + Math.cos(perpA) * armOffset;
-                            const oy = player.y + Math.sin(perpA) * armOffset;
+                            const spread  = (Math.random() - 0.5) * CONE * 2;
+                            const sideSign = _arm === 0 ? -1 : 1;
+                            // Lateral offset (perpendicular to aim)
+                            const lx = player.x + Math.cos(perpA) * sideSign * ARM_OUT;
+                            const ly = player.y + Math.sin(perpA) * sideSign * ARM_OUT;
+                            // Forward offset along aim
+                            const ox = lx + Math.cos(player.a) * ARM_FWD;
+                            const oy = ly + Math.sin(player.a) * ARM_FWD;
                             this.spawnProjectile(ox, oy, player.a + spread, player.team, player.id, {
                                 spd: 660, dmg: 11, r: 3, life: 0.9, pt: 'epa_mga',
                             });
@@ -2866,6 +2935,7 @@
                 burn: opts.burn || false,
                 intercept: opts.intercept || false,
                 pierce: opts.pierce || false,
+                homing: opts.homing || false,
                 pt: opts.pt || 't',
                 // Tracks which intercept sources have already processed this projectile.
                 // Each source gets exactly one roll — no repeated chances per tick.
