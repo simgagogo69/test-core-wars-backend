@@ -209,6 +209,11 @@
         PLASMA_DASH        : 29,   // Hellhound dash trail VFX
         REPAIR_BAY         : 30,   // Velarus deploys repair bay (wall + repair device)
         RESTORATION_FIELD  : 31,   // Caesarium creates a healing restoration field
+        // ── Infantry system events ──────────────────────────────────────────────
+        INF_SPAWN          : 32,   // infantry unit spawned
+        INF_DIE            : 33,   // infantry unit died
+        SHOUT              : 34,   // player shout — attach nearby infantry
+        BK_MODE            : 35,   // barracks infantry-mode changed
     };
 
     // ─── Turret upgrade tree ──────────────────────────────────────────────────────
@@ -410,13 +415,60 @@
 
     // Map faction → available vehicle types (empty = no vehicles yet)
     const FACTION_VEHICLES = {
-        'roe': ['roe_breaker', 'roe_suppressor'],
-        'bgm': ['bgm_prospector', 'bgm_tunnelrat', 'bgm_hauler'],
-        'epa': ['epa_citadel_interceptor', 'epa_knox_guardian'],
+        'roe': ['roe_breaker', 'roe_suppressor', 'apc'],
+        'bgm': ['bgm_prospector', 'bgm_tunnelrat', 'bgm_hauler', 'apc'],
+        'epa': ['epa_citadel_interceptor', 'epa_knox_guardian', 'apc'],
+    };
+
+    // ─── APC Vehicle Definition ───────────────────────────────────────────────────
+    VEHICLE_DEFS['apc'] = {
+        name: 'Troop Transport APC',
+        hp: 320, maxHp: 320, spd: 145, r: 36,
+        turnRate: 2.4, spawnCost: 50,
+        // Light hull MG for self-defence
+        driverFireRate: 380, driverDmg: 7, driverProjSpd: 580, driverProjR: 4,
+        driverMuzzle: { x: 40, y: 0 },
+        // No passenger weapon slot — infantry fill the hold instead
+        isAPC: true, infantryCapacity: 4,
+        singlePilot: true,   // only 1 player driver; infantry are cargo
     };
 
     // Vehicle depot build cost
     const VEHICLE_DEPOT_COST = 80;
+
+    // ─── Infantry System Constants ────────────────────────────────────────────────
+    const INF_MAX_SUPPLY        = 20;     // supply pool cap per team
+    const INF_PROD_AMOUNT       = 2;      // units auto-produced per barracks cycle
+    const INF_PROD_INTERVAL     = 4000;   // ms between barracks production cycles
+    const INF_AI_HZ             = 5;      // AI update rate (times per second)
+    const INF_AI_TICKS          = Math.round(TICK_RATE / INF_AI_HZ); // = 6
+    const FOLLOW_RANGE          = 340;    // px; infantry detach beyond this
+    const SHOUT_RADIUS          = 160;    // px; shout effect radius
+    const APC_BOARD_RANGE       = 110;    // px; infantry auto-board within this distance
+    const BARRACKS_COST         = 35;     // scrap cost to build barracks
+    const APC_FROM_BARRACKS_COST= 50;     // scrap cost to call APC from barracks
+    const BARRACKS_APC_COOLDOWN = 4000;   // ms between APC productions from barracks
+
+    // ─── Infantry Type Definitions ────────────────────────────────────────────────
+    // spd is in px/s.  Players run at 250 so all infantry are intentionally slower.
+    const INFANTRY_DEFS = {
+        'grunt': {
+            name  : 'Grunt',
+            hp    : 60,  maxHp: 60,  r: 9,
+            spd   : 72,                         // ~29% of player speed
+            dmg   : 8,   fireRate: 750, range: 270,
+            projSpd: 480, projR: 4,
+            cost  : 1,                           // 1 supply unit
+        },
+        'heavy': {
+            name  : 'Heavy Gunner',
+            hp    : 120, maxHp: 120, r: 11,
+            spd   : 55,                         // ~22% of player speed
+            dmg   : 14,  fireRate: 950, range: 220,
+            projSpd: 460, projR: 5,
+            cost  : 1,
+        },
+    };
 
 
     // hasUpgrades: only ROE gets the turret/wall upgrade tree
@@ -1211,6 +1263,8 @@
             hp: Math.round(v.hp), mhp: v.maxHp,
             drv: v.driverId  || null,
             pax: v.passengerId || null,
+            // APC infantry count
+            ic: v.infantryIds ? v.infantryIds.length : undefined,
             // Drone fields (mechs only)
             dx: v.droneX !== undefined ? Math.round(v.droneX) : undefined,
             dy: v.droneY !== undefined ? Math.round(v.droneY) : undefined,
@@ -1232,6 +1286,14 @@
             this.buildings = new Map();
             this.projs     = new Map();
             this.vehicles  = new Map();   // vehicleId → vehicle object
+
+            // ── Infantry system state ──────────────────────────────────────────
+            this.infantry    = new Map();  // infantryId → infantry object
+            this.teamSupply  = [
+                { current: INF_MAX_SUPPLY, max: INF_MAX_SUPPLY },  // team 0
+                { current: INF_MAX_SUPPLY, max: INF_MAX_SUPPLY },  // team 1
+            ];
+            this._infAiTick  = 0;   // counts ticks for 5 Hz AI throttle
 
             this.rankSum   = 0;   // sum of all player ranks in this room
             this.rankCount = 0;   // number of players (for avg rank calculation)
@@ -1780,6 +1842,24 @@
             // Broadcast name list once — not repeated in snapshots
             this.broadcastNames();
 
+            // Send current infantry world state to the joining player
+            if (this.infantry.size > 0) {
+                ws.send(JSON.stringify({
+                    t    : 'inf_sync',
+                    units: Array.from(this.infantry.values()).map(u => ({
+                        i: u.id, x: Math.round(u.x), y: Math.round(u.y),
+                        a: encodeAngle(u.a), tm: u.team, tp: u.type,
+                        hp: u.hp, mhp: u.maxHp,
+                    })),
+                }));
+            }
+            // Send this player's team supply
+            ws.send(JSON.stringify({
+                t: 'supply', tm: team,
+                cur: this.teamSupply[team].current,
+                max: this.teamSupply[team].max,
+            }));
+
             // Evaluate lobby countdown state with the new player count
             this.evaluateLobby();
         }
@@ -1871,6 +1951,13 @@
             if (this.repairDrones)   this.repairDrones.clear();
             if (this.scoutDrones)    this.scoutDrones.clear();
             if (this.shieldEmitters) this.shieldEmitters.clear();
+            // Reset infantry system for fresh game
+            this.infantry.clear();
+            this.teamSupply = [
+                { current: INF_MAX_SUPPLY, max: INF_MAX_SUPPLY },
+                { current: INF_MAX_SUPPLY, max: INF_MAX_SUPPLY },
+            ];
+            this._infAiTick = 0;
 
             this._prevPhase   = -1;
             this._prevTimer   = -1;
@@ -2591,6 +2678,21 @@
                                         const op = this.players.get(oid);
                                         if (op) { op.vehicleId = null; op.vehicleRole = null; }
                                     }
+                                    // APC: bail out infantry — they scatter and fight on
+                                    if (v.infantryIds && v.infantryIds.length > 0) {
+                                        let bailSpread = 0;
+                                        for (const iid of v.infantryIds) {
+                                            const inf = this.infantry.get(iid);
+                                            if (!inf) continue;
+                                            const bailA = (bailSpread / v.infantryIds.length) * Math.PI * 2;
+                                            inf.x      = clamp(v.x + Math.cos(bailA) * 40, inf.r, MAP_W - inf.r);
+                                            inf.y      = clamp(v.y + Math.sin(bailA) * 40, inf.r, MAP_H - inf.r);
+                                            inf.state  = 'default';
+                                            inf.followPlayerId = null;
+                                            bailSpread++;
+                                        }
+                                        v.infantryIds = [];
+                                    }
                                     this.vehicles.delete(vid);
                                     this.events.push({ e: EV.VEHICLE_DESTROY, id: vid });
                                 }
@@ -2938,6 +3040,57 @@
             // Force-broadcast immediately when the game just ended so the WIN event
             // is never stranded in this.events by the early-return at the top of tick().
             const justEnded = this.phase === PH.END && this._prevPhase !== PH.END;
+
+            // ── Barracks auto-production ────────────────────────────────────────────
+            if (this.phase === PH.ATTACK) {
+                for (const b of this.buildings.values()) {
+                    if (b.type !== 'bk') continue;
+                    if (now - (b.lastProduction || 0) < INF_PROD_INTERVAL) continue;
+                    const supply = this.teamSupply[b.team];
+                    if (supply.current < INF_PROD_AMOUNT) continue;
+                    b.lastProduction = now;
+                    for (let _pi = 0; _pi < INF_PROD_AMOUNT; _pi++) {
+                        this.spawnInfantry(b.team, b.x, b.y, b.infantryMode || 'grunt');
+                    }
+                }
+            }
+
+            // ── Infantry AI (5 Hz) ──────────────────────────────────────────────────
+            this._infAiTick = (this._infAiTick || 0) + 1;
+            if (this._infAiTick >= INF_AI_TICKS) {
+                this._infAiTick = 0;
+                const dtAi = INF_AI_TICKS / TICK_RATE;
+                this.tickInfantry(dtAi, now);
+            }
+
+            // ── Projectile vs Infantry collision ────────────────────────────────────
+            if (this.phase === PH.ATTACK && this.infantry.size > 0) {
+                for (const [pid, p] of this.projs) {
+                    if (p.life <= 0) continue;
+                    for (const [iid, inf] of this.infantry) {
+                        if (inf.team === p.team || inf.state === 'in_apc') continue;
+                        if (dist(p.x, p.y, inf.x, inf.y) < inf.r + p.r) {
+                            inf.hp -= p.dmg;
+                            this.projs.delete(pid);
+                            if (inf.hp <= 0) {
+                                this.killInfantry(iid);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // ── APC carries its infantry cargo ──────────────────────────────────────
+            for (const veh of this.vehicles.values()) {
+                if (!veh.infantryIds || veh.infantryIds.length === 0) continue;
+                for (let _ii = veh.infantryIds.length - 1; _ii >= 0; _ii--) {
+                    const inf = this.infantry.get(veh.infantryIds[_ii]);
+                    if (!inf) { veh.infantryIds.splice(_ii, 1); continue; }
+                    inf.x = veh.x; inf.y = veh.y;
+                }
+            }
+
             this._prevPhase = this.phase;
             if (justEnded || this.tickCount % SNAP_EVERY === 0) this.broadcastSnapshot();
         }
@@ -2982,13 +3135,302 @@
                 const d = dist(x, y, p.x, p.y);
                 if (d < minD) { minD = d; closest = p; }
             }
+            // Also consider enemy infantry as valid turret targets
+            for (const inf of this.infantry.values()) {
+                if (inf.team === team || inf.state === 'in_apc') continue;
+                const d = dist(x, y, inf.x, inf.y);
+                if (d < minD) { minD = d; closest = { x: inf.x, y: inf.y, hp: inf.hp, id: inf.id, r: inf.r, _isInfantry: true }; }
+            }
             return closest;
+        }
+
+        // ── Infantry AI target finder — players, turrets, walls, vehicles ──────────
+        findClosestEnemyForInfantry(x, y, team, maxRange) {
+            let target = null, minD = maxRange;
+            // Enemy players
+            for (const p of this.players.values()) {
+                if (p.team === team || p.rt > 0) continue;
+                const d = dist(x, y, p.x, p.y);
+                if (d < minD) { minD = d; target = { x: p.x, y: p.y }; }
+            }
+            // Enemy buildings (turrets, depots, barracks)
+            for (const b of this.buildings.values()) {
+                if (b.team === team) continue;
+                if (b.type !== 't' && b.type !== 'vd' && b.type !== 'bk') continue;
+                const d = dist(x, y, b.x, b.y);
+                if (d < minD) { minD = d; target = { x: b.x, y: b.y }; }
+            }
+            // Enemy vehicles
+            for (const v of this.vehicles.values()) {
+                if (v.team === team) continue;
+                const d = dist(x, y, v.x, v.y);
+                if (d < minD) { minD = d; target = { x: v.x, y: v.y }; }
+            }
+            return target;
+        }
+
+        // ── Supply helpers ────────────────────────────────────────────────────────
+        broadcastTeamSupply(team) {
+            const s = this.teamSupply[team];
+            for (const p of this.players.values()) {
+                if (p.team !== team) continue;
+                if (p.ws.readyState === WebSocket.OPEN) {
+                    p.ws.send(JSON.stringify({ t: 'supply', tm: team, cur: s.current, max: s.max }));
+                }
+            }
+        }
+
+        // ── Spawn a single infantry unit ──────────────────────────────────────────
+        spawnInfantry(team, x, y, type = 'grunt') {
+            const supply = this.teamSupply[team];
+            if (supply.current < 1) return null;
+            const def = INFANTRY_DEFS[type];
+            if (!def) return null;
+
+            const id     = shortId();
+            const jx     = (Math.random() - 0.5) * 36;
+            const jy     = (Math.random() - 0.5) * 36;
+            const spawnX = clamp(x + jx, def.r, MAP_W - def.r);
+            const spawnY = clamp(y + jy, def.r, MAP_H - def.r);
+
+            const inf = {
+                id, type, team,
+                x: spawnX, y: spawnY,
+                r: def.r, hp: def.hp, maxHp: def.maxHp,
+                a        : team === 0 ? 0 : Math.PI,
+                state    : 'default',           // 'default' | 'follow' | 'in_apc'
+                followPlayerId: null,
+                lastShot : 0,
+                _px: -9999, _py: -9999, _ab: -1, // delta sentinels
+            };
+
+            supply.current -= 1;
+            this.infantry.set(id, inf);
+
+            this.events.push({
+                e: EV.INF_SPAWN, i: id,
+                x: Math.round(inf.x), y: Math.round(inf.y),
+                tm: team, tp: type,
+                hp: inf.hp, mhp: inf.maxHp,
+            });
+            this.broadcastTeamSupply(team);
+            return inf;
+        }
+
+        // ── Remove an infantry unit and return supply ─────────────────────────────
+        killInfantry(id) {
+            const inf = this.infantry.get(id);
+            if (!inf) return;
+
+            // Bail out of any APC
+            for (const veh of this.vehicles.values()) {
+                if (!veh.infantryIds) continue;
+                const idx = veh.infantryIds.indexOf(id);
+                if (idx !== -1) veh.infantryIds.splice(idx, 1);
+            }
+
+            // Return supply
+            const s = this.teamSupply[inf.team];
+            s.current = Math.min(s.max, s.current + 1);
+
+            this.infantry.delete(id);
+            this.events.push({ e: EV.INF_DIE, i: id });
+            this.broadcastTeamSupply(inf.team);
+        }
+
+        // ── Shout: attach nearby friendly infantry to this player ─────────────────
+        handleShout(player) {
+            if (this.phase !== PH.ATTACK || player.rt > 0) return;
+            let cnt = 0;
+            for (const inf of this.infantry.values()) {
+                if (inf.team !== player.team || inf.state === 'in_apc') continue;
+                if (dist(player.x, player.y, inf.x, inf.y) <= SHOUT_RADIUS) {
+                    inf.state          = 'follow';
+                    inf.followPlayerId = player.id;
+                    cnt++;
+                }
+            }
+            this.events.push({
+                e: EV.SHOUT,
+                i: player.id,
+                x: Math.round(player.x), y: Math.round(player.y),
+                cnt,
+            });
+        }
+
+        // ── Produce an APC from a barracks ───────────────────────────────────────
+        handleBarracksAPC(player, barracksId) {
+            if (this.phase !== PH.ATTACK && this.phase !== PH.BUILD) return;
+            const b = this.buildings.get(barracksId);
+            if (!b || b.type !== 'bk' || b.team !== player.team) return;
+            if (player.res < APC_FROM_BARRACKS_COST) return;
+
+            const now = Date.now();
+            if (now - (b.apcCooldown || 0) < BARRACKS_APC_COOLDOWN) return;
+            b.apcCooldown = now;
+
+            const vDef   = VEHICLE_DEFS['apc'];
+            const sOff   = b.r + vDef.r + 10;
+            const spawnX = clamp(b.x + (player.team === 0 ? -sOff : sOff), vDef.r, MAP_W - vDef.r);
+            const spawnY = clamp(b.y, vDef.r, MAP_H - vDef.r);
+            const vid    = shortId();
+
+            const veh = {
+                id: vid, type: 'apc', team: player.team,
+                x: spawnX, y: spawnY,
+                a: player.team === 0 ? 0 : Math.PI, pa: 0,
+                hp: vDef.maxHp, maxHp: vDef.maxHp, r: vDef.r,
+                driverId: null, passengerId: null,
+                infantryIds: [],
+                lastDriverShot: 0, lastPassengerShot: 0,
+            };
+            this.vehicles.set(vid, veh);
+            player.res -= APC_FROM_BARRACKS_COST;
+
+            this.events.push({ e: EV.VEHICLE_SPAWN, veh: wireVehicle(veh) });
+            this.events.push({ e: EV.RES_CHANGE, i: player.id, r: player.res });
+        }
+
+        // ── 5 Hz infantry AI tick ─────────────────────────────────────────────────
+        // Called from the main tick loop; dt is the AI step in seconds.
+        tickInfantry(dtAi, now) {
+            if (this.phase !== PH.ATTACK) return;
+
+            for (const [iid, inf] of this.infantry) {
+                if (inf.state === 'in_apc') continue;
+
+                const def       = INFANTRY_DEFS[inf.type];
+                const enemyCore = this.cores[1 - inf.team];
+
+                // ── Determine movement goal ──────────────────────────────────────
+                let goalX = enemyCore.x, goalY = enemyCore.y;
+
+                if (inf.state === 'follow') {
+                    const leader = this.players.get(inf.followPlayerId);
+                    if (!leader || leader.rt > 0) {
+                        inf.state = 'default'; inf.followPlayerId = null;
+                    } else {
+                        const d = dist(inf.x, inf.y, leader.x, leader.y);
+                        if (d > FOLLOW_RANGE) {
+                            inf.state = 'default'; inf.followPlayerId = null;
+                        } else {
+                            // Hang back slightly — cluster ~50px behind leader
+                            goalX = leader.x; goalY = leader.y;
+                        }
+                    }
+                }
+
+                // ── Attack if enemy in range ─────────────────────────────────────
+                if (now - inf.lastShot > def.fireRate) {
+                    const tgt = this.findClosestEnemyForInfantry(inf.x, inf.y, inf.team, def.range);
+                    if (tgt) {
+                        inf.lastShot = now;
+                        const angle  = Math.atan2(tgt.y - inf.y, tgt.x - inf.x);
+                        inf.a        = angle;
+                        this.spawnProjectile(inf.x, inf.y, angle, inf.team, iid, {
+                            spd : def.projSpd, dmg: def.dmg,
+                            r   : def.projR,   life: 1.6,
+                            pt  : 'inf_' + inf.type,
+                        });
+                    }
+                }
+
+                // ── Steering ─────────────────────────────────────────────────────
+                const dx = goalX - inf.x, dy = goalY - inf.y;
+                const dd = Math.hypot(dx, dy);
+
+                let mvx = 0, mvy = 0;
+
+                // Move toward goal
+                if (dd > 12) {
+                    mvx = (dx / dd) * def.spd * dtAi;
+                    mvy = (dy / dd) * def.spd * dtAi;
+                }
+
+                // Avoid nearby infantry (same team) — mild separation
+                const AVOID_R = 20;
+                for (const [oid, other] of this.infantry) {
+                    if (oid === iid || other.state === 'in_apc') continue;
+                    const od = dist(inf.x, inf.y, other.x, other.y);
+                    if (od < AVOID_R && od > 0) {
+                        const push = (AVOID_R - od) * 0.35;
+                        mvx -= ((other.x - inf.x) / od) * push;
+                        mvy -= ((other.y - inf.y) / od) * push;
+                    }
+                }
+
+                // Avoid walls — soft repulsion
+                for (const b of this.buildings.values()) {
+                    if (b.type !== 'w') continue;
+                    const bd = dist(inf.x, inf.y, b.x, b.y);
+                    if (bd < 28 && bd > 0) {
+                        mvx -= ((b.x - inf.x) / bd) * 4;
+                        mvy -= ((b.y - inf.y) / bd) * 4;
+                    }
+                }
+
+                // Slight randomness to prevent perfect locking
+                mvx += (Math.random() - 0.5) * 3.5;
+                mvy += (Math.random() - 0.5) * 3.5;
+
+                // Apply movement with boundary + water + wall collision
+                let nx = clamp(inf.x + mvx, inf.r, MAP_W - inf.r);
+                let ny = clamp(inf.y + mvy, inf.r, MAP_H - inf.r);
+
+                if (this.isOnWater(nx, inf.y, inf.r)) nx = inf.x;
+                if (this.isOnWater(inf.x, ny, inf.r)) ny = inf.y;
+
+                for (const b of this.buildings.values()) {
+                    if (b.type === 'w') {
+                        const rx = b.x - WALL_HALF, ry = b.y - WALL_HALF;
+                        if (circleRect(nx, inf.y, inf.r, rx, ry, WALL_W, WALL_W)) nx = inf.x;
+                        if (circleRect(inf.x, ny, inf.r, rx, ry, WALL_W, WALL_W)) ny = inf.y;
+                    }
+                }
+
+                if (Math.hypot(mvx, mvy) > 0.5) inf.a = Math.atan2(mvy, mvx);
+                inf.x = nx;
+                inf.y = ny;
+            }
         }
 
         handleBuild(player, req) {
             if (this.phase !== PH.BUILD && this.phase !== PH.ATTACK) return;
 
             const faction = FACTIONS[this.teamFactions[player.team]] || FACTIONS['roe'];
+
+            // ── Barracks — auto-produces infantry ─────────────────────────────────
+            if (req.bt === 'bk') {
+                if (player.res < BARRACKS_COST) return;
+
+                const mid    = MAP_W / 2;
+                const onRed  = req.x < mid - 50;
+                const onBlue = req.x > mid + 50;
+                if ((player.team === 0 && !onRed) || (player.team === 1 && !onBlue)) return;
+                if (this.isOnWater(req.x, req.y, 32)) return;
+
+                // Max 2 barracks per team
+                let bkCount = 0;
+                for (const eb of this.buildings.values()) {
+                    if (eb.type === 'bk' && eb.team === player.team) bkCount++;
+                }
+                if (bkCount >= 2) return;
+
+                const id = shortId();
+                const b  = {
+                    id, type: 'bk', subtype: 'bk', team: player.team,
+                    x: req.x, y: req.y,
+                    hp: 300, maxHp: 300, r: 26,
+                    infantryMode  : 'grunt',
+                    lastProduction: now - INF_PROD_INTERVAL, // ready immediately
+                    apcCooldown   : 0,
+                };
+                this.buildings.set(id, b);
+                player.res -= BARRACKS_COST;
+                this.events.push({ e: EV.BUILD_ADD, b: wireBuild(b) });
+                this.events.push({ e: EV.RES_CHANGE, i: player.id, r: player.res });
+                return;
+            }
 
             // ── Vehicle depot — place the building itself ──────────────────────────
             if (req.bt === 'vd') {
@@ -3220,7 +3662,23 @@
                 veh.driverId       = player.id;
                 player.vehicleId   = vid;
                 player.vehicleRole = 'driver';
-            } else if (!veh.passengerId && !vDef.singlePilot) {
+
+                // APC: auto-board nearby friendly infantry (attached or not)
+                if (vDef.isAPC) {
+                    if (!veh.infantryIds) veh.infantryIds = [];
+                    for (const [iid, inf] of this.infantry) {
+                        if (veh.infantryIds.length >= (vDef.infantryCapacity || 4)) break;
+                        if (inf.team !== veh.team || inf.state === 'in_apc') continue;
+                        // Board if nearby OR already following this player
+                        if (dist(veh.x, veh.y, inf.x, inf.y) <= APC_BOARD_RANGE ||
+                            (inf.state === 'follow' && inf.followPlayerId === player.id)) {
+                            inf.state          = 'in_apc';
+                            inf.followPlayerId = null;
+                            veh.infantryIds.push(iid);
+                        }
+                    }
+                }
+            } else if (!veh.passengerId && !vDef.singlePilot && !vDef.isAPC) {
                 veh.passengerId    = player.id;
                 player.vehicleId   = vid;
                 player.vehicleRole = 'passenger';
@@ -3236,6 +3694,23 @@
                 // Eject slightly to the side
                 player.x = clamp(veh.x + (player.team === 0 ? -70 : 70), player.r, MAP_W - player.r);
                 player.y = clamp(veh.y + 30, player.r, MAP_H - player.r);
+
+                // APC: unload infantry — they resume default AI at APC position
+                if (veh.infantryIds && veh.infantryIds.length > 0) {
+                    const unloadIds = [...veh.infantryIds];
+                    veh.infantryIds = [];
+                    let spread = 0;
+                    for (const iid of unloadIds) {
+                        const inf = this.infantry.get(iid);
+                        if (!inf) continue;
+                        const angle = (spread / Math.max(1, unloadIds.length)) * Math.PI * 2;
+                        inf.x      = clamp(veh.x + Math.cos(angle) * 28, inf.r, MAP_W - inf.r);
+                        inf.y      = clamp(veh.y + Math.sin(angle) * 28, inf.r, MAP_H - inf.r);
+                        inf.state  = 'default';
+                        inf.followPlayerId = null;
+                        spread++;
+                    }
+                }
             }
             player.vehicleId   = null;
             player.vehicleRole = null;
@@ -3332,6 +3807,19 @@
             if (changed.length) snap.p = changed;
             if (evs.length)     snap.ev = evs;
 
+            // Infantry delta — only units that moved or changed HP
+            const infChanged = [];
+            for (const inf of this.infantry.values()) {
+                const rx = Math.round(inf.x);
+                const ry = Math.round(inf.y);
+                const ab = encodeAngle(inf.a);
+                if (rx !== inf._px || ry !== inf._py || ab !== inf._ab) {
+                    inf._px = rx; inf._py = ry; inf._ab = ab;
+                    infChanged.push({ i: inf.id, x: rx, y: ry, a: ab, hp: inf.hp });
+                }
+            }
+            if (infChanged.length) snap.inf = infChanged;
+
             // Always include full vehicle state (few vehicles, always relevant)
             if (this.vehicles.size > 0) {
                 snap.vh = Array.from(this.vehicles.values()).map(wireVehicle);
@@ -3396,6 +3884,26 @@
                         player.a      = +(data.a)  || 0;
                         player.inp.sh = !!data.sh;
                     }
+
+                } else if (data.t === 'shout' && room) {
+                    const player = room.players.get(id);
+                    if (player) room.handleShout(player);
+
+                } else if (data.t === 'bk_mode' && room) {
+                    // Player changes barracks production mode
+                    const player = room.players.get(id);
+                    if (!player) return;
+                    const b = room.buildings.get(data.id);
+                    if (!b || b.type !== 'bk' || b.team !== player.team) return;
+                    if (['grunt', 'heavy'].includes(data.mode)) {
+                        b.infantryMode = data.mode;
+                        room.events.push({ e: EV.BK_MODE, i: b.id, mode: data.mode });
+                    }
+
+                } else if (data.t === 'bk_apc' && room) {
+                    // Player calls an APC from a barracks
+                    const player = room.players.get(id);
+                    if (player) room.handleBarracksAPC(player, data.id);
 
                 } else if (data.t === 'b' && room) {
                     const player = room.players.get(id);
