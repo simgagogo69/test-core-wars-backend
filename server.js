@@ -3403,6 +3403,7 @@
             if (req.bt === 'bk') {
                 if (player.res < BARRACKS_COST) return;
 
+                const now    = Date.now();
                 const mid    = MAP_W / 2;
                 const onRed  = req.x < mid - 50;
                 const onBlue = req.x > mid + 50;
