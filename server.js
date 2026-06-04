@@ -943,11 +943,11 @@
             desc: 'Charges and fires a high-speed piercing projectile effective against vehicles and structures.',
             cooldown: 16, duration: 0,
             handler(room, player) {
-                // Rail cannon is mounted on the LEFT shoulder — offset perpendicular to aim
-                const perpA  = player.a + Math.PI / 2;  // left side (negative y in local space)
+                // Rail cannon is mounted on the RIGHT shoulder — positive perpendicular to aim
+                const perpA  = player.a + Math.PI / 2;
                 const SHOULDER_OFFSET = 14;
-                const ox = player.x + Math.cos(perpA) * -SHOULDER_OFFSET;
-                const oy = player.y + Math.sin(perpA) * -SHOULDER_OFFSET;
+                const ox = player.x + Math.cos(perpA) * SHOULDER_OFFSET;
+                const oy = player.y + Math.sin(perpA) * SHOULDER_OFFSET;
 
                 room.spawnProjectile(ox, oy, player.a, player.team, player.id, {
                     spd: 1600, dmg: 130, r: 8, life: 2.8,
@@ -2469,6 +2469,28 @@
                 let dead         = p.life <= 0 || p.x < 0 || p.x > MAP_W || p.y < 0 || p.y > MAP_H;
                 let hitSomething = false;
 
+                // ── Repair Bay wall collision (Velarus) ─────────────────────────────────
+                if (!dead && this.repairBays && this.repairBays.size > 0 && p.team !== undefined) {
+                    for (const bay of this.repairBays.values()) {
+                        if (bay.expiresAt <= now || p.team === bay.team) continue;
+                        // Wall is perpendicular to bay.a; its tangent direction is bay.a + π/2
+                        const WALL_HALF_W = 65;
+                        const wallNx = Math.cos(bay.a), wallNy = Math.sin(bay.a);
+                        const wallTx = -wallNy,          wallTy =  wallNx;
+                        // Current projectile distance from wall along its normal
+                        const dx   = p.x - bay.x, dy = p.y - bay.y;
+                        const nNow = dx * wallNx + dy * wallNy;
+                        const tNow = dx * wallTx + dy * wallTy;
+                        // Reconstruct previous-tick position and check if normal sign flipped
+                        const prevX = p.x - Math.cos(p.a) * p.spd * dt;
+                        const prevY = p.y - Math.sin(p.a) * p.spd * dt;
+                        const nPrev = (prevX - bay.x) * wallNx + (prevY - bay.y) * wallNy;
+                        if (nNow * nPrev <= 0 && Math.abs(tNow) < WALL_HALF_W) {
+                            dead = true; break;
+                        }
+                    }
+                }
+
                 if (!dead && this.phase === PH.ATTACK) {
                     for (const target of this.players.values()) {
                         if (dead) break;
@@ -2849,8 +2871,8 @@
                     if (now - player._mgaLastShot >= 65) {
                         player._mgaLastShot = now;
                         const CONE = 0.28;
-                        const ARM_OUT   = 22;  // lateral distance from body centre to arm
-                        const ARM_FWD   = 14;  // forward reach of arm before muzzle
+                        const ARM_OUT   = 22;  // lateral distance from body centre to arm muzzle
+                        const ARM_FWD   = 28;  // forward reach to muzzle — matches VFX drawn tip
                         const perpA = player.a + Math.PI / 2;
                         for (let _arm = 0; _arm < 2; _arm++) {
                             const spread  = (Math.random() - 0.5) * CONE * 2;
