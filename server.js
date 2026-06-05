@@ -415,22 +415,38 @@
 
     // Map faction → available vehicle types (empty = no vehicles yet)
     const FACTION_VEHICLES = {
-        'roe': ['roe_breaker', 'roe_suppressor', 'apc'],
-        'bgm': ['bgm_prospector', 'bgm_tunnelrat', 'bgm_hauler', 'apc'],
-        'epa': ['epa_citadel_interceptor', 'epa_knox_guardian', 'apc'],
+        'roe': ['roe_breaker', 'roe_suppressor', 'roe_apc'],
+        'bgm': ['bgm_prospector', 'bgm_tunnelrat', 'bgm_hauler', 'bgm_apc'],
+        'epa': ['epa_citadel_interceptor', 'epa_knox_guardian', 'epa_apc'],
     };
 
-    // ─── APC Vehicle Definition ───────────────────────────────────────────────────
-    VEHICLE_DEFS['apc'] = {
-        name: 'Troop Transport APC',
-        hp: 320, maxHp: 320, spd: 145, r: 36,
-        turnRate: 2.4, spawnCost: 50,
-        // Light hull MG for self-defence
+    // ─── Faction APC definitions ──────────────────────────────────────────────────
+    // ROE: Mammoth Transport Truck — fast, wheeled, light armour
+    VEHICLE_DEFS['roe_apc'] = {
+        name: 'Mammoth Transport', faction: 'roe',
+        hp: 300, maxHp: 300, spd: 165, r: 34,
+        turnRate: 2.7, spawnCost: 50,
         driverFireRate: 380, driverDmg: 7, driverProjSpd: 580, driverProjR: 4,
-        driverMuzzle: { x: 40, y: 0 },
-        // No passenger weapon slot — infantry fill the hold instead
-        isAPC: true, infantryCapacity: 4,
-        singlePilot: true,   // only 1 player driver; infantry are cargo
+        driverMuzzle: { x: 38, y: 0 },
+        isAPC: true, infantryCapacity: 4, singlePilot: true,
+    };
+    // BGM: Yukon Walker Carrier — slow, heavy, best armour
+    VEHICLE_DEFS['bgm_apc'] = {
+        name: 'Yukon Carrier', faction: 'bgm',
+        hp: 420, maxHp: 420, spd: 105, r: 42,
+        turnRate: 1.9, spawnCost: 50,
+        driverFireRate: 520, driverDmg: 10, driverProjSpd: 510, driverProjR: 5,
+        driverMuzzle: { x: 48, y: 0 },
+        isAPC: true, infantryCapacity: 4, singlePilot: true,
+    };
+    // EPA: Hovercarrier — fastest, lightest, energy weapons
+    VEHICLE_DEFS['epa_apc'] = {
+        name: 'Knox Hovercarrier', faction: 'epa',
+        hp: 250, maxHp: 250, spd: 195, r: 40,
+        turnRate: 3.2, spawnCost: 50,
+        driverFireRate: 300, driverDmg: 6, driverProjSpd: 640, driverProjR: 4,
+        driverMuzzle: { x: 44, y: 0 },
+        isAPC: true, infantryCapacity: 4, singlePilot: true,
     };
 
     // Vehicle depot build cost
@@ -3269,14 +3285,19 @@
             if (now - (b.apcCooldown || 0) < BARRACKS_APC_COOLDOWN) return;
             b.apcCooldown = now;
 
-            const vDef   = VEHICLE_DEFS['apc'];
+            // Pick this team's faction-specific APC
+            const faction = this.teamFactions[player.team] || 'roe';
+            const apcType = faction + '_apc';
+            const vDef    = VEHICLE_DEFS[apcType];
+            if (!vDef) return;
+
             const sOff   = b.r + vDef.r + 10;
             const spawnX = clamp(b.x + (player.team === 0 ? -sOff : sOff), vDef.r, MAP_W - vDef.r);
             const spawnY = clamp(b.y, vDef.r, MAP_H - vDef.r);
             const vid    = shortId();
 
             const veh = {
-                id: vid, type: 'apc', team: player.team,
+                id: vid, type: apcType, team: player.team,
                 x: spawnX, y: spawnY,
                 a: player.team === 0 ? 0 : Math.PI, pa: 0,
                 hp: vDef.maxHp, maxHp: vDef.maxHp, r: vDef.r,
