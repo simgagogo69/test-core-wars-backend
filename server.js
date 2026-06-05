@@ -439,7 +439,7 @@
         driverMuzzle: { x: 48, y: 0 },
         isAPC: true, infantryCapacity: 4, singlePilot: true,
     };
-    // EPA: Hovercarrier — fastest, lightest, energy weapons
+    // EPA: Knox Hovercarrier — fastest, lightest, energy weapons
     VEHICLE_DEFS['epa_apc'] = {
         name: 'Knox Hovercarrier', faction: 'epa',
         hp: 250, maxHp: 250, spd: 195, r: 40,
