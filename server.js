@@ -493,6 +493,26 @@
             projSpd: 460, projR: 5,
             cost  : 1,
         },
+
+        // ── ROE infantry ───────────────────────────────────────────────────────
+        // Mass-produced wartime automatons. Cheap, practical, intentionally weak.
+
+        'roe_rifle': {
+            name  : 'R-K9 Rifle Unit',
+            hp    : 55,  maxHp: 55,  r: 9,
+            spd   : 70,                         // frontline pusher, practical gait
+            dmg   : 7,   fireRate: 580, range: 300, // fast suppressive bursts
+            projSpd: 490, projR: 3,             // lightweight rifle round
+            cost  : 1,
+        },
+        'roe_breach': {
+            name  : 'R-K12 Breach Unit',
+            hp    : 70,  maxHp: 70,  r: 10,
+            spd   : 63,                         // heavier chest plate slows it
+            dmg   : 18,  fireRate: 860, range: 145, // hits hard up close, useless at range
+            projSpd: 360, projR: 5,             // wide slow scatter — shotgun feel
+            cost  : 1,
+        },
     };
 
 
@@ -3537,7 +3557,7 @@
                     id, type: 'bk', subtype: 'bk', team: player.team,
                     x: req.x, y: req.y,
                     hp: 300, maxHp: 300, r: 26,
-                    infantryMode  : 'grunt',
+                    infantryMode  : this.teamFactions[player.team] === 'roe' ? 'roe_rifle' : 'grunt',
                     lastProduction: now - INF_PROD_INTERVAL, // ready immediately
                     apcCooldown   : 0,
                 };
@@ -4081,7 +4101,7 @@
                     if (!player) return;
                     const b = room.buildings.get(data.id);
                     if (!b || b.type !== 'bk' || b.team !== player.team) return;
-                    if (['grunt', 'heavy'].includes(data.mode)) {
+                    if (['grunt', 'heavy', 'roe_rifle', 'roe_breach'].includes(data.mode)) {
                         b.infantryMode = data.mode;
                         room.events.push({ e: EV.BK_MODE, i: b.id, mode: data.mode });
                     }
