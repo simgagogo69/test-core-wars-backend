@@ -214,6 +214,7 @@
         INF_DIE            : 33,   // infantry unit died
         SHOUT              : 34,   // player shout — attach nearby infantry
         BK_MODE            : 35,   // barracks infantry-mode changed
+        INF_HIT            : 36,   // infantry took damage and survived (HP update only)
     };
 
     // ─── Turret upgrade tree ──────────────────────────────────────────────────────
@@ -433,7 +434,7 @@
     // BGM: Yukon Walker Carrier — slow, heavy, best armour
     VEHICLE_DEFS['bgm_apc'] = {
         name: 'Yukon Carrier', faction: 'bgm',
-        hp: 420, maxHp: 420, spd: 105, r: 42,
+        hp: 420, maxHp: 420, spd: 140, r: 42,
         turnRate: 1.9, spawnCost: 50,
         driverFireRate: 520, driverDmg: 10, driverProjSpd: 510, driverProjR: 5,
         driverMuzzle: { x: 48, y: 0 },
@@ -458,6 +459,13 @@
     const INF_PROD_INTERVAL     = 4000;   // ms between barracks production cycles
     const INF_AI_HZ             = 5;      // AI update rate (times per second)
     const INF_AI_TICKS          = Math.round(TICK_RATE / INF_AI_HZ); // = 6
+
+    // ─── Infantry Networking Thresholds ──────────────────────────────────────────
+    // Tune these to balance visual fidelity vs. bandwidth. Raising them reduces
+    // network traffic; lowering them increases smoothness.
+    const INF_POS_THRESHOLD        = 4;    // px  — min position Δ per axis to transmit a move update
+    const INF_ANGLE_BYTE_THRESHOLD = 4;    // enc — min encoded-angle Δ to transmit (out of 256; ≈5°)
+    const INF_INTEREST_RADIUS      = 1400; // px  — clients only receive infantry within this radius
     const FOLLOW_RANGE          = 340;    // px; infantry detach beyond this
     const SHOUT_RADIUS          = 160;    // px; shout effect radius
     const APC_BOARD_RANGE       = 110;    // px; infantry auto-board within this distance
@@ -1310,6 +1318,7 @@
                 { current: INF_MAX_SUPPLY, max: INF_MAX_SUPPLY },  // team 1
             ];
             this._infAiTick  = 0;   // counts ticks for 5 Hz AI throttle
+            this._infAiDidUpdate = false; // set true when AI runs; consumed by broadcastSnapshot
 
             this.rankSum   = 0;   // sum of all player ranks in this room
             this.rankCount = 0;   // number of players (for avg rank calculation)
@@ -1328,6 +1337,15 @@
             this._prevPhase   = -1;
             this._prevTimer   = -1;
             this._prevCoreHPs = [-1, -1];
+
+            // ── Bandwidth profiling ───────────────────────────────────────────
+            this._bwStats = {
+                bytesSent  : 0,   // cumulative bytes sent this window
+                infUpdates : 0,   // infantry update entries sent
+                vehUpdates : 0,   // vehicle update entries sent
+                snapshots  : 0,   // snapshot broadcasts
+                lastLog    : Date.now(),
+            };
 
             // Lobby ready / countdown state
             this.readyStates    = new Map();  // playerId → true(ready) | false(not-ready)
@@ -1569,6 +1587,7 @@
             this._prevTimer    = -1;
             this._prevCoreHPs  = [-1, -1];
             this._lastScrapTick = null;
+            this._infAiDidUpdate = false;
 
             // Initialise all players — rt=9999 keeps them out of the world until
             // they individually lock their loadout via handleLockIn
@@ -1858,11 +1877,14 @@
             // Broadcast name list once — not repeated in snapshots
             this.broadcastNames();
 
-            // Send current infantry world state to the joining player
-            if (this.infantry.size > 0) {
+            // Send current infantry world state to the joining player.
+            // Infantry inside APCs are excluded: their position is the APC's position
+            // and the APC's 'ic' field already communicates the cargo count.
+            const visibleInfantry = Array.from(this.infantry.values()).filter(u => u.state !== 'in_apc');
+            if (visibleInfantry.length > 0) {
                 ws.send(JSON.stringify({
                     t    : 'inf_sync',
-                    units: Array.from(this.infantry.values()).map(u => ({
+                    units: visibleInfantry.map(u => ({
                         i: u.id, x: Math.round(u.x), y: Math.round(u.y),
                         a: encodeAngle(u.a), tm: u.team, tp: u.type,
                         hp: u.hp, mhp: u.maxHp,
@@ -1973,12 +1995,8 @@
                 { current: INF_MAX_SUPPLY, max: INF_MAX_SUPPLY },
                 { current: INF_MAX_SUPPLY, max: INF_MAX_SUPPLY },
             ];
-            this._infAiTick = 0;
-
-            this._prevPhase   = -1;
-            this._prevTimer   = -1;
-            this._prevCoreHPs = [-1, -1];
-            this._lastScrapTick = null;
+            this._infAiTick      = 0;
+            this._infAiDidUpdate = false;
 
             for (const p of this.players.values()) {
                 p.res = 150;
@@ -3090,6 +3108,9 @@
                             this.projs.delete(pid);
                             if (inf.hp <= 0) {
                                 this.killInfantry(iid);
+                            } else {
+                                // HP-only event — keeps HP out of movement packets
+                                this.events.push({ e: EV.INF_HIT, i: iid, hp: inf.hp });
                             }
                             break;
                         }
@@ -3109,6 +3130,9 @@
 
             this._prevPhase = this.phase;
             if (justEnded || this.tickCount % SNAP_EVERY === 0) this.broadcastSnapshot();
+
+            // Log bandwidth stats every ~10 s (300 ticks at 30 Hz)
+            if (this.tickCount % 300 === 0) this.logBandwidthStats();
         }
 
         spawnProjectile(x, y, a, team, ownerId, opts = {}) {
@@ -3316,6 +3340,9 @@
         // Called from the main tick loop; dt is the AI step in seconds.
         tickInfantry(dtAi, now) {
             if (this.phase !== PH.ATTACK) return;
+            // Mark that AI ran this cycle — broadcastSnapshot uses this to gate
+            // infantry updates to 5 Hz instead of 10 Hz.
+            this._infAiDidUpdate = true;
 
             for (const [iid, inf] of this.infantry) {
                 if (inf.state === 'in_apc') continue;
@@ -3807,9 +3834,7 @@
                 }
             }
 
-            // Skip broadcast entirely if nothing changed
-            if (changed.length === 0 && evs.length === 0) return;
-
+            // ── Build common snapshot header (no infantry yet) ────────────────
             const snap = { t: 's' };
 
             if (this.phase !== this._prevPhase) {
@@ -3829,25 +3854,97 @@
             if (changed.length) snap.p = changed;
             if (evs.length)     snap.ev = evs;
 
-            // Infantry delta — only units that moved or changed HP
-            const infChanged = [];
-            for (const inf of this.infantry.values()) {
-                const rx = Math.round(inf.x);
-                const ry = Math.round(inf.y);
-                const ab = encodeAngle(inf.a);
-                if (rx !== inf._px || ry !== inf._py || ab !== inf._ab) {
-                    inf._px = rx; inf._py = ry; inf._ab = ab;
-                    infChanged.push({ i: inf.id, x: rx, y: ry, a: ab, hp: inf.hp });
-                }
-            }
-            if (infChanged.length) snap.inf = infChanged;
-
             // Always include full vehicle state (few vehicles, always relevant)
             if (this.vehicles.size > 0) {
                 snap.vh = Array.from(this.vehicles.values()).map(wireVehicle);
             }
 
-            this.broadcastRaw(JSON.stringify(snap));
+            // ── OPTIMIZATION 1 + 2 + 3 + 4: Infantry delta ───────────────────
+            // • Only computed on AI-update cycles (5 Hz, not 10 Hz)
+            // • Skips infantry inside APCs (position equals APC; APC sends 'ic' count)
+            // • 4px / ~5° thresholds suppress noise and stopped-unit chatter
+            // • HP removed from movement packets — use dedicated INF_HIT event instead
+            const infChanged = [];
+            if (this._infAiDidUpdate) {
+                this._infAiDidUpdate = false;
+                for (const inf of this.infantry.values()) {
+                    if (inf.state === 'in_apc') continue;          // OPT 4: skip APC cargo
+                    const rx = Math.round(inf.x);
+                    const ry = Math.round(inf.y);
+                    const ab = encodeAngle(inf.a);
+                    const moved = Math.abs(rx - inf._px) >= INF_POS_THRESHOLD ||
+                                  Math.abs(ry - inf._py) >= INF_POS_THRESHOLD;
+                    const turned = Math.abs(ab - inf._ab) >= INF_ANGLE_BYTE_THRESHOLD;
+                    if (moved || turned) {
+                        inf._px = rx; inf._py = ry; inf._ab = ab;
+                        // OPT 3: position-only packet — no HP field
+                        infChanged.push({ i: inf.id, x: rx, y: ry, a: ab });
+                    }
+                }
+            }
+
+            // ── Determine if there is anything at all to send ─────────────────
+            const hasCommon = snap.ph !== undefined || snap.tm !== undefined ||
+                              snap.c  !== undefined || changed.length > 0    ||
+                              evs.length > 0        || snap.vh !== undefined;
+
+            if (!hasCommon && infChanged.length === 0) return;
+
+            // ── OPTIMIZATION 5: Interest-management — per-player infantry send ─
+            // Infantry updates are sent individually per client, filtered to units
+            // within INF_INTEREST_RADIUS of that player's position.
+            // Common (non-infantry) data is reused from a single serialisation.
+            const bw = this._bwStats;
+            bw.snapshots++;
+            if (snap.vh) bw.vehUpdates += snap.vh.length;
+
+            if (infChanged.length === 0) {
+                // No infantry this cycle — single broadcast is cheapest
+                const str = JSON.stringify(snap);
+                this.broadcastRaw(str);
+                bw.bytesSent += str.length * this.players.size;
+            } else {
+                bw.infUpdates += infChanged.length;
+                for (const pl of this.players.values()) {
+                    if (pl.ws.readyState !== WebSocket.OPEN) continue;
+
+                    // Filter infantry to those within interest radius of this player
+                    const visInf = infChanged.filter(u => {
+                        const inf = this.infantry.get(u.i);
+                        return inf && dist(pl.x, pl.y, inf.x, inf.y) <= INF_INTEREST_RADIUS;
+                    });
+
+                    if (!hasCommon && visInf.length === 0) continue; // nothing for this client
+
+                    // Build per-player snap (share base object when no inf for this player)
+                    const pSnap = visInf.length
+                        ? Object.assign({}, snap, { inf: visInf })
+                        : snap;
+                    const str = JSON.stringify(pSnap);
+                    pl.ws.send(str);
+                    bw.bytesSent += str.length;
+                }
+            }
+        }
+
+        // ── OPTIMIZATION 6: Periodic bandwidth profiling ─────────────────────────
+        logBandwidthStats() {
+            const bw      = this._bwStats;
+            const elapsed = (Date.now() - bw.lastLog) / 1000;
+            if (elapsed < 1) return;
+            const kbps = (bw.bytesSent / elapsed / 1024).toFixed(1);
+            console.log(
+                `[BW room=${this.id} players=${this.players.size}] ` +
+                `${kbps} KB/s | ` +
+                `inf=${(bw.infUpdates / elapsed).toFixed(0)}/s | ` +
+                `veh=${(bw.vehUpdates / elapsed).toFixed(0)}/s | ` +
+                `snaps=${(bw.snapshots / elapsed).toFixed(0)}/s`
+            );
+            bw.bytesSent  = 0;
+            bw.infUpdates = 0;
+            bw.vehUpdates = 0;
+            bw.snapshots  = 0;
+            bw.lastLog    = Date.now();
         }
 
         broadcastRaw(payload) {
