@@ -439,6 +439,7 @@
         driverFireRate: 520, driverDmg: 10, driverProjSpd: 510, driverProjR: 5,
         driverMuzzle: { x: 48, y: 0 },
         isAPC: true, infantryCapacity: 4, singlePilot: true,
+        isMech: true,   // biped walker — uses WASD strafe, not tank steering
     };
     // EPA: Knox Hovercarrier — fastest, lightest, energy weapons
     VEHICLE_DEFS['epa_apc'] = {
@@ -1261,6 +1262,49 @@
     const clamp   = (v,lo,hi)     => Math.max(lo, Math.min(hi, v));
     const shortId = ()            => crypto.randomBytes(3).toString('hex');
 
+    // Segment-circle intersection: returns true if line segment (ax,ay)→(bx,by)
+    // passes within radius r of point (cx,cy). Used for accurate bullet raycasting.
+    function segCircle(ax, ay, bx, by, cx, cy, r) {
+        const dx = bx - ax, dy = by - ay;
+        const fx = ax - cx, fy = ay - cy;
+        const a = dx*dx + dy*dy;
+        if (a === 0) return fx*fx + fy*fy <= r*r;  // degenerate: point test
+        const b = 2*(fx*dx + fy*dy);
+        const c = fx*fx + fy*fy - r*r;
+        let disc = b*b - 4*a*c;
+        if (disc < 0) return false;
+        disc = Math.sqrt(disc);
+        const t1 = (-b - disc) / (2*a);
+        const t2 = (-b + disc) / (2*a);
+        return (t1 >= 0 && t1 <= 1) || (t2 >= 0 && t2 <= 1) || (t1 < 0 && t2 > 1);
+    }
+
+    // Segment-expanded-rect intersection (Minkowski sum: inflate rect by bullet radius).
+    // Replaces circleRect point-check for wall collision so fast bullets never skip through.
+    function segRect(ax, ay, bx, by, pr, rx, ry, rw, rh) {
+        // Expand rect by bullet radius on all sides
+        const ex = rx - pr, ey = ry - pr, ew = rw + 2*pr, eh = rh + 2*pr;
+        // Fast reject: bounding box of segment vs expanded rect
+        if (Math.min(ax,bx) > ex+ew || Math.max(ax,bx) < ex) return false;
+        if (Math.min(ay,by) > ey+eh || Math.max(ay,by) < ey) return false;
+        // Check if either endpoint is inside
+        if (ax >= ex && ax <= ex+ew && ay >= ey && ay <= ey+eh) return true;
+        if (bx >= ex && bx <= ex+ew && by >= ey && by <= ey+eh) return true;
+        // Check segment against all four expanded rect edges
+        function segSeg(p1x,p1y,p2x,p2y,p3x,p3y,p4x,p4y) {
+            const d1x=p2x-p1x,d1y=p2y-p1y,d2x=p4x-p3x,d2y=p4y-p3y;
+            const denom=d1x*d2y-d1y*d2x;
+            if(Math.abs(denom)<1e-9) return false;
+            const t=((p3x-p1x)*d2y-(p3y-p1y)*d2x)/denom;
+            const u=((p3x-p1x)*d1y-(p3y-p1y)*d1x)/denom;
+            return t>=0&&t<=1&&u>=0&&u<=1;
+        }
+        return segSeg(ax,ay,bx,by,ex,ey,ex+ew,ey) ||
+               segSeg(ax,ay,bx,by,ex+ew,ey,ex+ew,ey+eh) ||
+               segSeg(ax,ay,bx,by,ex,ey+eh,ex+ew,ey+eh) ||
+               segSeg(ax,ay,bx,by,ex,ey,ex,ey+eh);
+    }
+
     function circleRect(cx, cy, cr, rx, ry, rw, rh) {
         const tx = clamp(cx, rx, rx + rw);
         const ty = clamp(cy, ry, ry + rh);
@@ -1293,6 +1337,10 @@
             dx: v.droneX !== undefined ? Math.round(v.droneX) : undefined,
             dy: v.droneY !== undefined ? Math.round(v.droneY) : undefined,
             da: v.droneA !== undefined ? encodeAngle(v.droneA) : undefined,
+            // Drone orbit angle — 0..255 maps 0..2π, used by client for smooth extrapolation
+            doa: v.droneOrbitAngle !== undefined
+                ? Math.round(((v.droneOrbitAngle % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2)) / (Math.PI * 2) * 255) & 0xFF
+                : undefined,
             // Movement angle for mech legs (separate from v.a which is driver aim)
             ma: v.moveA !== undefined ? encodeAngle(v.moveA) : undefined,
         };
@@ -2267,13 +2315,18 @@
 
                     if (vDef.isMech) {
                         // ── Biped movement: world-space WASD strafe, heading = driver aim ──
-                        nvx = veh.x + driver.inp.dx * spd * dt;
-                        nvy = veh.y + driver.inp.dy * spd * dt;
                         veh.a = driver.a;   // mech body faces where player aims
                         // Track movement direction separately for leg rendering
                         const mdx = driver.inp.dx, mdy = driver.inp.dy;
                         if (Math.hypot(mdx, mdy) > 0.05) veh.moveA = Math.atan2(mdy, mdx);
                         // (if not moving, keep previous moveA so legs hold their last direction)
+                        if (driver.inp.sh) {
+                            // Stop-to-shoot: freeze position while trigger is held
+                            nvx = veh.x; nvy = veh.y;
+                        } else {
+                            nvx = veh.x + driver.inp.dx * spd * dt;
+                            nvy = veh.y + driver.inp.dy * spd * dt;
+                        }
                     } else {
                         // ── Tank-style steering ────────────────────────────────────
                         const turnRate = vDef.turnRate || 2.2;
@@ -2282,8 +2335,13 @@
                         const throttle = driver.inp.dx * fwdX  + driver.inp.dy * fwdY;
                         const steer    = driver.inp.dx * sideX + driver.inp.dy * sideY;
                         veh.a += steer * turnRate * dt;
-                        nvx = veh.x + Math.cos(veh.a) * throttle * spd * dt;
-                        nvy = veh.y + Math.sin(veh.a) * throttle * spd * dt;
+                        if (driver.inp.sh) {
+                            // Stop-to-shoot: allow turning in place, but no forward movement
+                            nvx = veh.x; nvy = veh.y;
+                        } else {
+                            nvx = veh.x + Math.cos(veh.a) * throttle * spd * dt;
+                            nvy = veh.y + Math.sin(veh.a) * throttle * spd * dt;
+                        }
                     }
 
                     // Map bounds
@@ -2559,6 +2617,11 @@
             }
 
             for (const [pid, p] of this.projs) {
+                // Record position before movement for raycast collision this tick
+                const prevX = p.x;
+                const prevY = p.y;
+                p.px = prevX;   // store on projectile so infantry collision can use it
+                p.py = prevY;
                 p.x += Math.cos(p.a) * p.spd * dt;
                 p.y += Math.sin(p.a) * p.spd * dt;
                 p.life -= dt;
@@ -2602,12 +2665,12 @@
                         const dx   = p.x - bay.x, dy = p.y - bay.y;
                         const nNow = dx * wallNx + dy * wallNy;
                         const tNow = dx * wallTx + dy * wallTy;
-                        // Reconstruct previous-tick position and check if normal sign flipped
-                        const prevX = p.x - Math.cos(p.a) * p.spd * dt;
-                        const prevY = p.y - Math.sin(p.a) * p.spd * dt;
+                        // Use stored previous position (already recorded above)
                         const nPrev = (prevX - bay.x) * wallNx + (prevY - bay.y) * wallNy;
                         if (nNow * nPrev <= 0 && Math.abs(tNow) < WALL_HALF_W) {
-                            dead = true; break;
+                            dead = true;
+                            hitSomething = true;  // ensures PROJ_DESTROY is sent so client removes bullet visually
+                            break;
                         }
                     }
                 }
@@ -2616,7 +2679,7 @@
                     for (const target of this.players.values()) {
                         if (dead) break;
                         if (target.rt > 0 || target.team === p.team) continue;
-                        if (dist(p.x, p.y, target.x, target.y) < target.r + p.r) {
+                        if (segCircle(prevX, prevY, p.x, p.y, target.x, target.y, target.r + p.r)) {
                             target.hp -= p.dmg;
                             target.lastDamaged = now;
                             dead = true; hitSomething = true;
@@ -2647,9 +2710,10 @@
                         for (const [bid, b] of this.buildings) {
                             if (b.team === p.team) continue;
                             const hit =
-                                (b.type === 'w'  && circleRect(p.x, p.y, p.r, b.x-WALL_HALF, b.y-WALL_HALF, WALL_W, WALL_W)) ||
-                                (b.type === 't'  && dist(p.x, p.y, b.x, b.y) < b.r + p.r) ||
-                                (b.type === 'vd' && dist(p.x, p.y, b.x, b.y) < b.r + p.r);
+                                (b.type === 'w'  && segRect(prevX, prevY, p.x, p.y, p.r, b.x-WALL_HALF, b.y-WALL_HALF, WALL_W, WALL_W)) ||
+                                (b.type === 't'  && segCircle(prevX, prevY, p.x, p.y, b.x, b.y, b.r + p.r)) ||
+                                (b.type === 'vd' && segCircle(prevX, prevY, p.x, p.y, b.x, b.y, b.r + p.r)) ||
+                                (b.type === 'bk' && segCircle(prevX, prevY, p.x, p.y, b.x, b.y, (b.r || 20) + p.r));
                             if (hit) {
                                 const dmg = p.bonusVsBldg ? Math.round(p.dmg * 1.5)
                                         : (p.bonusVsWall && b.type === 'w') ? Math.round(p.dmg * p.bonusVsWall)
@@ -2698,7 +2762,7 @@
                     if (!dead) {
                         for (const [vid, v] of this.vehicles) {
                             if (v.team === p.team) continue;
-                            if (dist(p.x, p.y, v.x, v.y) < v.r + p.r) {
+                            if (segCircle(prevX, prevY, p.x, p.y, v.x, v.y, v.r + p.r)) {
                                 const vDef2 = VEHICLE_DEFS[v.type] || {};
                                 const bracing = vDef2.driverBrace && v.braceUntil && now < v.braceUntil;
                                 const actualDmg = bracing ? Math.round(p.dmg * (1 - (vDef2.braceDmgReduce || 0))) : p.dmg;
@@ -2737,7 +2801,7 @@
 
                     if (!dead) {
                         for (const c of this.cores) {
-                            if (c.team === p.team || dist(p.x, p.y, c.x, c.y) >= c.r + p.r) continue;
+                            if (c.team === p.team || !segCircle(prevX, prevY, p.x, p.y, c.x, c.y, c.r + p.r)) continue;
                             c.hp  -= p.dmg;
                             dead   = true; hitSomething = true;
                             if (c.hp <= 0) {
@@ -3103,7 +3167,10 @@
                     if (p.life <= 0) continue;
                     for (const [iid, inf] of this.infantry) {
                         if (inf.team === p.team || inf.state === 'in_apc') continue;
-                        if (dist(p.x, p.y, inf.x, inf.y) < inf.r + p.r) {
+                        // Use stored prevX/prevY for accurate segment-circle raycast
+                        const _ipx = p.px !== undefined ? p.px : p.x;
+                        const _ipy = p.py !== undefined ? p.py : p.y;
+                        if (segCircle(_ipx, _ipy, p.x, p.y, inf.x, inf.y, inf.r + p.r)) {
                             inf.hp -= p.dmg;
                             this.projs.delete(pid);
                             if (inf.hp <= 0) {
