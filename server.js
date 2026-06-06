@@ -513,6 +513,50 @@
             projSpd: 360, projR: 5,             // wide slow scatter — shotgun feel
             cost  : 1,
         },
+
+        // ── BGM infantry ───────────────────────────────────────────────────────
+        // Armed industrial machinery. Mining equipment retrofitted for combat.
+
+        'bgm_bur3': {
+            name  : 'BUR-3 Excavation Unit',
+            hp    : 65,  maxHp: 65,  r: 10,
+            spd   : 66,                         // quadruped — steady but not agile
+            dmg   : 9,   fireRate: 700, range: 280, // reliable automatic fire
+            projSpd: 470, projR: 4,             // standard rifle round
+            cost  : 1,
+        },
+        'bgm_bur8': {
+            name  : 'BUR-8 Tunnel Hound',
+            hp    : 52,  maxHp: 52,  r: 9,
+            spd   : 82,                         // faster — built for aggressive forward pushes
+            dmg   : 6,   fireRate: 420, range: 210, // rapid SMG: low dmg, very fast fire rate
+            projSpd: 520, projR: 3,             // fast light rounds, wide spread
+            cost  : 1,
+        },
+
+        // ── EPA infantry ───────────────────────────────────────────────────────
+        // Precision-manufactured security automatons. Disciplined and coordinated.
+
+        'epa_guardian': {
+            name  : 'EPA Guardian Unit',
+            hp    : 60,  maxHp: 60,  r: 9,
+            spd   : 65,                         // deliberate positioning, not a sprinter
+            dmg   : 11,  fireRate: 950, range: 320, // disciplined burst — fewer shots, accurate
+            projSpd: 520, projR: 3,             // fast precise round
+            cost  : 1,
+        },
+        'epa_intercept': {
+            name  : 'EPA Intercept Unit',
+            hp    : 50,  maxHp: 50,  r: 8,
+            spd   : 70,                         // repositions to cover threatened areas
+            dmg   : 6,   fireRate: 680, range: 230, // lightweight carbine — secondary role
+            projSpd: 490, projR: 3,
+            cost  : 1,
+            // ── Interception parameters ────────────────────────────────────────
+            interceptRadius  : 80,              // px — modest area, not a full denial zone
+            interceptChance  : 0.15,            // 15% per qualifying projectile in radius
+            interceptCooldown: 4000,            // ms — 4s between successful intercepts
+        },
     };
 
 
@@ -3470,6 +3514,32 @@
                     }
                 }
 
+                // ── EPA Intercept Unit: passive projectile interception ───────────────
+                // Occasionally destroys incoming splash projectiles (rockets, grenades,
+                // missiles) that enter the interception radius. Gated by a per-unit
+                // cooldown so it only fires occasionally — not a denial field.
+                if (inf.type === 'epa_intercept') {
+                    const iDef = INFANTRY_DEFS['epa_intercept'];
+                    if (!inf.lastIntercept || now - inf.lastIntercept > iDef.interceptCooldown) {
+                        for (const [pid, p] of this.projs) {
+                            if (p.team === inf.team) continue;           // never intercept own projectiles
+                            if (!p.splash || p.splash <= 0) continue;   // only splash/explosive projectiles
+                            if (dist(inf.x, inf.y, p.x, p.y) >= iDef.interceptRadius) continue;
+                            if (p.interceptSeen.has(iid)) continue;      // one roll per source per projectile
+                            p.interceptSeen.add(iid);
+                            if (Math.random() < iDef.interceptChance) {
+                                inf.lastIntercept = now;
+                                this.projs.delete(pid);
+                                // sx/sy: intercept source (infantry pos), px/py: where projectile was
+                                this.events.push({ e: EV.PROJ_DESTROY, i: pid,
+                                    sx: Math.round(inf.x), sy: Math.round(inf.y),
+                                    px: Math.round(p.x),   py: Math.round(p.y) });
+                                break;  // one interception per AI tick max
+                            }
+                        }
+                    }
+                }
+
                 // ── Steering ─────────────────────────────────────────────────────
                 const dx = goalX - inf.x, dy = goalY - inf.y;
                 const dd = Math.hypot(dx, dy);
@@ -3557,7 +3627,10 @@
                     id, type: 'bk', subtype: 'bk', team: player.team,
                     x: req.x, y: req.y,
                     hp: 300, maxHp: 300, r: 26,
-                    infantryMode  : this.teamFactions[player.team] === 'roe' ? 'roe_rifle' : 'grunt',
+                    infantryMode  : this.teamFactions[player.team] === 'roe' ? 'roe_rifle'
+                                  : this.teamFactions[player.team] === 'bgm' ? 'bgm_bur3'
+                                  : this.teamFactions[player.team] === 'epa' ? 'epa_guardian'
+                                  : 'grunt',
                     lastProduction: now - INF_PROD_INTERVAL, // ready immediately
                     apcCooldown   : 0,
                 };
@@ -4101,7 +4174,7 @@
                     if (!player) return;
                     const b = room.buildings.get(data.id);
                     if (!b || b.type !== 'bk' || b.team !== player.team) return;
-                    if (['grunt', 'heavy', 'roe_rifle', 'roe_breach'].includes(data.mode)) {
+                    if (['grunt', 'heavy', 'roe_rifle', 'roe_breach', 'bgm_bur3', 'bgm_bur8', 'epa_guardian', 'epa_intercept'].includes(data.mode)) {
                         b.infantryMode = data.mode;
                         room.events.push({ e: EV.BK_MODE, i: b.id, mode: data.mode });
                     }
