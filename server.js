@@ -3115,9 +3115,10 @@
                         while (diff >  Math.PI) diff -= Math.PI * 2;
                         while (diff < -Math.PI) diff += Math.PI * 2;
                         if (Math.abs(diff) > SHIELD_HALF_ARC) continue;
-                        // Absorb: delete projectile, drain shield HP — no event broadcast
+                        // Absorb: delete projectile, drain shield HP, notify clients
                         shield.hp -= p.dmg * 0.5;
                         this.projs.delete(pid);
+                        this.events.push({ e: EV.PROJ_DESTROY, i: pid });
                     }
                 }
             }
