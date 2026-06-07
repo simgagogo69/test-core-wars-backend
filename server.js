@@ -559,6 +559,21 @@
         },
     };
 
+    // ── Per-type barrel tip offsets (local space: +X = forward, +Y = right) ────
+    // Bullets spawn from the visual barrel tip, not the unit's movement centre.
+    // bx/by are in aim-angle local coordinates — the same frame the client draws in —
+    // so the visual barrel tip and the bullet spawn point always match.
+    const INFANTRY_BARREL = {
+        'grunt'         : { bx: 20,    by:  0    },
+        'heavy'         : { bx: 21,    by:  0    },
+        'roe_rifle'     : { bx: 21,    by: -10   }, // side-mounted upper edge
+        'roe_breach'    : { bx: 20,    by:  0    },
+        'bgm_bur3'      : { bx: 19,    by: -12.8 }, // side-mounted rifle upper edge
+        'bgm_bur8'      : { bx: 21,    by:  0    },
+        'epa_guardian'  : { bx: 23,    by: -2    }, // precision barrel, slightly above centre
+        'epa_intercept' : { bx: 18,    by:  2    }, // carbine, below centre
+    };
+
 
     // hasUpgrades: only ROE gets the turret/wall upgrade tree
     // wallCost / turretCost: initial build price for this faction
@@ -3506,7 +3521,10 @@
                         inf.lastShot = now;
                         const angle  = Math.atan2(tgt.y - inf.y, tgt.x - inf.x);
                         inf.a        = angle;
-                        this.spawnProjectile(inf.x, inf.y, angle, inf.team, iid, {
+                        const _b     = INFANTRY_BARREL[inf.type] || { bx: 15, by: 0 };
+                        const _bx    = inf.x + Math.cos(angle) * _b.bx - Math.sin(angle) * _b.by;
+                        const _by    = inf.y + Math.sin(angle) * _b.bx + Math.cos(angle) * _b.by;
+                        this.spawnProjectile(_bx, _by, angle, inf.team, iid, {
                             spd : def.projSpd, dmg: def.dmg,
                             r   : def.projR,   life: 1.6,
                             pt  : 'inf_' + inf.type,
