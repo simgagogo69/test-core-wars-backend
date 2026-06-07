@@ -2414,8 +2414,8 @@
                         const throttle = driver.inp.dx * fwdX  + driver.inp.dy * fwdY;
                         const steer    = driver.inp.dx * sideX + driver.inp.dy * sideY;
                         veh.a += steer * turnRate * dt;
-                        if (driver.inp.sh) {
-                            // Stop-to-shoot: allow turning in place, but no forward movement
+                        if (driver.inp.sh && !vDef.isAPC) {
+                            // Stop-to-shoot: non-APC tank-style vehicles freeze while firing
                             nvx = veh.x; nvy = veh.y;
                         } else {
                             nvx = veh.x + Math.cos(veh.a) * throttle * spd * dt;
@@ -3384,8 +3384,9 @@
                 x: spawnX, y: spawnY,
                 r: def.r, hp: def.hp, maxHp: def.maxHp,
                 a        : team === 0 ? 0 : Math.PI,
-                state    : 'default',           // 'default' | 'follow' | 'in_apc'
+                state    : 'default',   // 'default' | 'follow' | 'boarding_apc' | 'in_apc'
                 followPlayerId: null,
+                boardingApcId : null,   // set while walking toward an APC to board it
                 lastShot : 0,
                 _px: -9999, _py: -9999, _ab: -1, // delta sentinels
             };
@@ -3496,6 +3497,30 @@
                 const def       = INFANTRY_DEFS[inf.type];
                 const enemyCore = this.cores[1 - inf.team];
 
+                // ── boarding_apc: walk directly toward APC, skip all other AI ─────
+                if (inf.state === 'boarding_apc') {
+                    const boardVeh = this.vehicles.get(inf.boardingApcId);
+                    if (!boardVeh || boardVeh.team !== inf.team) {
+                        // APC gone or captured — resume default
+                        inf.state = 'default'; inf.boardingApcId = null;
+                    } else {
+                        // Cancel if APC is now full (another unit beat us to it)
+                        const cap = (VEHICLE_DEFS[boardVeh.type] || {}).infantryCapacity || 4;
+                        if ((boardVeh.infantryIds || []).length >= cap) {
+                            inf.state = 'default'; inf.boardingApcId = null;
+                        } else {
+                            const dx = boardVeh.x - inf.x, dy = boardVeh.y - inf.y;
+                            const dd = Math.hypot(dx, dy);
+                            if (dd > 0) {
+                                inf.a = Math.atan2(dy, dx);
+                                inf.x = clamp(inf.x + (dx / dd) * def.spd * dtAi, inf.r, MAP_W - inf.r);
+                                inf.y = clamp(inf.y + (dy / dd) * def.spd * dtAi, inf.r, MAP_H - inf.r);
+                            }
+                        }
+                    }
+                    continue; // skip normal combat AI
+                }
+
                 // ── Determine movement goal ──────────────────────────────────────
                 let goalX = enemyCore.x, goalY = enemyCore.y;
 
@@ -3508,57 +3533,56 @@
                         if (d > FOLLOW_RANGE) {
                             inf.state = 'default'; inf.followPlayerId = null;
                         } else {
-                            // Hang back slightly — cluster ~50px behind leader
                             goalX = leader.x; goalY = leader.y;
                         }
                     }
                 }
 
-                // ── Attack if enemy in range ─────────────────────────────────────
-                if (now - inf.lastShot > def.fireRate) {
-                    const tgt = this.findClosestEnemyForInfantry(inf.x, inf.y, inf.team, def.range);
-                    if (tgt) {
-                        inf.lastShot = now;
-                        const angle  = Math.atan2(tgt.y - inf.y, tgt.x - inf.x);
-                        inf.a        = angle;
-                        const _b     = INFANTRY_BARREL[inf.type] || { bx: 15, by: 0 };
-                        const _bx    = inf.x + Math.cos(angle) * _b.bx - Math.sin(angle) * _b.by;
-                        const _by    = inf.y + Math.sin(angle) * _b.bx + Math.cos(angle) * _b.by;
-                        this.spawnProjectile(_bx, _by, angle, inf.team, iid, {
-                            spd : def.projSpd, dmg: def.dmg,
-                            r   : def.projR,   life: 1.6,
-                            pt  : 'inf_' + inf.type,
-                        });
-                    }
+                // ── Single target lookup — used for both attack and move suppression ──
+                const _tgt = this.findClosestEnemyForInfantry(inf.x, inf.y, inf.team, def.range);
+
+                // ── Attack if enemy in range and fire cooldown expired ────────────
+                if (_tgt && now - inf.lastShot > def.fireRate) {
+                    inf.lastShot = now;
+                    const angle  = Math.atan2(_tgt.y - inf.y, _tgt.x - inf.x);
+                    inf.a        = angle;
+                    const _b     = INFANTRY_BARREL[inf.type] || { bx: 15, by: 0 };
+                    const _bx    = inf.x + Math.cos(angle) * _b.bx - Math.sin(angle) * _b.by;
+                    const _by    = inf.y + Math.sin(angle) * _b.bx + Math.cos(angle) * _b.by;
+                    this.spawnProjectile(_bx, _by, angle, inf.team, iid, {
+                        spd : def.projSpd, dmg: def.dmg,
+                        r   : def.projR,   life: 1.6,
+                        pt  : 'inf_' + inf.type,
+                    });
                 }
 
                 // ── EPA Intercept Unit: passive projectile interception ───────────────
-                // Occasionally destroys incoming splash projectiles (rockets, grenades,
-                // missiles) that enter the interception radius. Gated by a per-unit
-                // cooldown so it only fires occasionally — not a denial field.
                 if (inf.type === 'epa_intercept') {
                     const iDef = INFANTRY_DEFS['epa_intercept'];
                     if (!inf.lastIntercept || now - inf.lastIntercept > iDef.interceptCooldown) {
                         for (const [pid, p] of this.projs) {
-                            if (p.team === inf.team) continue;           // never intercept own projectiles
-                            if (!p.splash || p.splash <= 0) continue;   // only splash/explosive projectiles
+                            if (p.team === inf.team) continue;
+                            if (!p.splash || p.splash <= 0) continue;
                             if (dist(inf.x, inf.y, p.x, p.y) >= iDef.interceptRadius) continue;
-                            if (p.interceptSeen.has(iid)) continue;      // one roll per source per projectile
+                            if (p.interceptSeen.has(iid)) continue;
                             p.interceptSeen.add(iid);
                             if (Math.random() < iDef.interceptChance) {
                                 inf.lastIntercept = now;
                                 this.projs.delete(pid);
-                                // sx/sy: intercept source (infantry pos), px/py: where projectile was
                                 this.events.push({ e: EV.PROJ_DESTROY, i: pid,
                                     sx: Math.round(inf.x), sy: Math.round(inf.y),
                                     px: Math.round(p.x),   py: Math.round(p.y) });
-                                break;  // one interception per AI tick max
+                                break;
                             }
                         }
                     }
                 }
 
-                // ── Steering ─────────────────────────────────────────────────────
+                // ── Stop to shoot — face target, skip movement while engaged ─────────
+                if (_tgt) {
+                    inf.a = Math.atan2(_tgt.y - inf.y, _tgt.x - inf.x);
+                    continue; // no movement when a target is in range
+                }
                 const dx = goalX - inf.x, dy = goalY - inf.y;
                 const dd = Math.hypot(dx, dy);
 
@@ -3890,18 +3914,28 @@
                 player.vehicleId   = vid;
                 player.vehicleRole = 'driver';
 
-                // APC: auto-board nearby friendly infantry (attached or not)
+                // APC: two-phase infantry boarding — units walk up then disappear inside
                 if (vDef.isAPC) {
                     if (!veh.infantryIds) veh.infantryIds = [];
                     for (const [iid, inf] of this.infantry) {
-                        if (veh.infantryIds.length >= (vDef.infantryCapacity || 4)) break;
                         if (inf.team !== veh.team || inf.state === 'in_apc') continue;
-                        // Board if nearby OR already following this player
-                        if (dist(veh.x, veh.y, inf.x, inf.y) <= APC_BOARD_RANGE ||
-                            (inf.state === 'follow' && inf.followPlayerId === player.id)) {
-                            inf.state          = 'in_apc';
+
+                        const d = dist(veh.x, veh.y, inf.x, inf.y);
+
+                        if (inf.state === 'boarding_apc' && inf.boardingApcId === vid) {
+                            // Phase 2: infantry has walked close enough — board it
+                            if (d <= 30 && veh.infantryIds.length < (vDef.infantryCapacity || 4)) {
+                                inf.state         = 'in_apc';
+                                inf.boardingApcId = null;
+                                veh.infantryIds.push(iid);
+                            }
+                        } else if (inf.state !== 'boarding_apc' &&
+                                   d <= APC_BOARD_RANGE &&
+                                   veh.infantryIds.length < (vDef.infantryCapacity || 4)) {
+                            // Phase 1: infantry enters boarding radius — start walking toward APC
+                            inf.state         = 'boarding_apc';
+                            inf.boardingApcId = vid;
                             inf.followPlayerId = null;
-                            veh.infantryIds.push(iid);
                         }
                     }
                 }
@@ -3935,6 +3969,7 @@
                         inf.y      = clamp(veh.y + Math.sin(angle) * 28, inf.r, MAP_H - inf.r);
                         inf.state  = 'default';
                         inf.followPlayerId = null;
+                        inf.boardingApcId  = null;
                         spread++;
                     }
                 }
