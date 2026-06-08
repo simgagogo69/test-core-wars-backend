@@ -3331,7 +3331,7 @@
             return closest;
         }
 
-        // ── Infantry AI target finder — players, turrets, walls, vehicles ──────────
+        // ── Infantry AI target finder — players, turrets, walls, vehicles, core ───
         findClosestEnemyForInfantry(x, y, team, maxRange) {
             let target = null, minD = maxRange;
             // Enemy players
@@ -3352,6 +3352,12 @@
                 if (v.team === team) continue;
                 const d = dist(x, y, v.x, v.y);
                 if (d < minD) { minD = d; target = { x: v.x, y: v.y }; }
+            }
+            // Enemy core — infantry stop and shoot when in range
+            const enemyCore = this.cores[1 - team];
+            if (enemyCore) {
+                const d = dist(x, y, enemyCore.x, enemyCore.y);
+                if (d < minD) { minD = d; target = { x: enemyCore.x, y: enemyCore.y }; }
             }
             return target;
         }
