@@ -4166,6 +4166,12 @@
                 if (p.ws.readyState === WebSocket.OPEN) p.ws.send(payload);
             }
         }
+        // Broadcast only to players on a specific team
+        broadcastTeam(payload, team) {
+            for (const p of this.players.values()) {
+                if (p.team === team && p.ws.readyState === WebSocket.OPEN) p.ws.send(payload);
+            }
+        }
     }
 
     // ─── WebSocket server ─────────────────────────────────────────────────────────
@@ -4331,10 +4337,18 @@
                 } else if (data.t === 'chat' && room) {
                     const player = room.players.get(id);
                     if (player && typeof data.msg === 'string') {
-                        const safe = data.msg.slice(0, 120);
-                        room.broadcastRaw(JSON.stringify({
-                            t: 'chat', id, nm: player.name, team: player.team, msg: safe,
-                        }));
+                        const safe  = data.msg.slice(0, 120).trim();
+                        const scope = data.scope === 'team' ? 'team' : 'lobby';
+                        const payload = JSON.stringify({
+                            t: 'chat', id, nm: player.name, team: player.team, msg: safe, scope,
+                        });
+                        // Team-scope: send only to same-team players
+                        // Lobby-scope: send to everyone in the room
+                        if (scope === 'team') {
+                            room.broadcastTeam(payload, player.team);
+                        } else {
+                            room.broadcastRaw(payload);
+                        }
                     }
                 }
             } catch (e) {
