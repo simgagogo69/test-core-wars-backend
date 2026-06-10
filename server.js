@@ -456,7 +456,7 @@
 
     // ─── Infantry System Constants ────────────────────────────────────────────────
     const INF_MAX_SUPPLY        = 20;     // supply pool cap per team
-    const INF_PROD_AMOUNT       = 2;      // units auto-produced per barracks cycle
+    const INF_PROD_AMOUNT       = 1;      // units auto-produced per barracks cycle
     const INF_PROD_INTERVAL     = 4000;   // ms between barracks production cycles
     const INF_AI_HZ             = 5;      // AI update rate (times per second)
     const INF_AI_TICKS          = Math.round(TICK_RATE / INF_AI_HZ); // = 6
@@ -609,6 +609,7 @@
             dmg: 15, fireRate: 110, reloadTime: 2200,
             projSpd: 700, projR: 4, spread: 0.04,
             magSize: 30, range: 600, falloffStart: 400,
+            moveSpeedMult: 1.00,  // baseline
         },
 
         // ── Battle Rifles ─────────────────────────────────────────────────────
@@ -617,6 +618,7 @@
             dmg: 28, fireRate: 280, reloadTime: 2600,
             projSpd: 800, projR: 4, spread: 0.02,
             magSize: 20, range: 750, falloffStart: 500,
+            moveSpeedMult: 0.93,  // heavier, longer
         },
         // ── Submachine Guns ───────────────────────────────────────────────────
         // NOTE: SMGs are shared between Engineer and Support operators
@@ -625,6 +627,7 @@
             dmg: 10, fireRate: 75, reloadTime: 1800,
             projSpd: 640, projR: 3, spread: 0.09,
             magSize: 35, range: 400, falloffStart: 250,
+            moveSpeedMult: 1.10,  // compact and light
         },
 
         // ── Light Machine Guns ────────────────────────────────────────────────
@@ -633,6 +636,7 @@
             dmg: 13, fireRate: 90, reloadTime: 3800,
             projSpd: 660, projR: 4, spread: 0.10,
             magSize: 75, range: 500, falloffStart: 350,
+            moveSpeedMult: 0.85,  // heavy weapon
         },
         // ── Heavy Machine Guns ────────────────────────────────────────────────
         'hmg_suppression': {
@@ -640,6 +644,7 @@
             dmg: 18, fireRate: 95, reloadTime: 5000,
             projSpd: 640, projR: 5, spread: 0.13,
             magSize: 100, range: 480, falloffStart: 320,
+            moveSpeedMult: 0.75,  // very heavy
         },
         // ── Sniper Rifles ─────────────────────────────────────────────────────
         'sniper_long': {
@@ -647,6 +652,7 @@
             dmg: 85, fireRate: 1400, reloadTime: 3200,
             projSpd: 1200, projR: 4, spread: 0.0,
             magSize: 5, range: 1800, falloffStart: 800,
+            moveSpeedMult: 0.80,  // long and heavy
         },
         // ── Designated Marksman Rifles ────────────────────────────────────────
         'dmr_standard': {
@@ -654,6 +660,7 @@
             dmg: 42, fireRate: 550, reloadTime: 2600,
             projSpd: 950, projR: 4, spread: 0.01,
             magSize: 10, range: 1100, falloffStart: 600,
+            moveSpeedMult: 0.90,  // precision rifle
         },
         // ── Pistols ───────────────────────────────────────────────────────────
         'pistol_standard': {
@@ -661,6 +668,7 @@
             dmg: 20, fireRate: 350, reloadTime: 1400,
             projSpd: 680, projR: 3, spread: 0.03,
             magSize: 12, range: 380, falloffStart: 220,
+            moveSpeedMult: 1.15,  // lightest, fastest
         },
         // ── Revolvers ─────────────────────────────────────────────────────────
         'revolver_heavy': {
@@ -668,6 +676,7 @@
             dmg: 55, fireRate: 700, reloadTime: 2800,
             projSpd: 720, projR: 5, spread: 0.02,
             magSize: 6, range: 500, falloffStart: 300,
+            moveSpeedMult: 1.05,  // compact sidearm
         },
         // ── Shotguns ──────────────────────────────────────────────────────────
         'shotgun_pump': {
@@ -675,6 +684,7 @@
             dmg: 18, fireRate: 800, reloadTime: 2600,
             projSpd: 520, projR: 6, spread: 0.22,
             magSize: 6, pellets: 7, range: 250, falloffStart: 120,
+            moveSpeedMult: 1.00,  // balanced trade-off
         },
     };
 
@@ -1425,6 +1435,41 @@
         };
     }
 
+
+    // ─── Spatial Hash Grid ───────────────────────────────────────────────────────
+    // Replaces O(N×M) entity loops with O(1) cell lookup.
+    // Cell size 80px: fits infantry separation (r=20) in 1-4 cells,
+    // fits turret range queries in ≤10×10 cells.
+    class SpatialHash {
+        constructor(cellSize = 80) {
+            this._cs  = cellSize;
+            this._map = new Map();
+        }
+        _key(cx, cy) { return (cx & 0x7FFF) | ((cy & 0x7FFF) << 15); }
+        _cx(x) { return Math.floor(x / this._cs); }
+        _cy(y) { return Math.floor(y / this._cs); }
+        insert(x, y, obj) {
+            const k = this._key(this._cx(x), this._cy(y));
+            let c = this._map.get(k);
+            if (!c) { c = []; this._map.set(k, c); }
+            c.push(obj);
+        }
+        // Returns all objects in cells overlapping the square [x±r, y±r].
+        // Callers do precise distance filtering after the query.
+        query(x, y, r) {
+            const x0 = this._cx(x - r), x1 = this._cx(x + r);
+            const y0 = this._cy(y - r), y1 = this._cy(y + r);
+            const out = [];
+            for (let cx = x0; cx <= x1; cx++)
+                for (let cy = y0; cy <= y1; cy++) {
+                    const c = this._map.get(this._key(cx, cy));
+                    if (c) for (const o of c) out.push(o);
+                }
+            return out;
+        }
+        clear() { this._map.clear(); }
+    }
+
     // ─── Room ────────────────────────────────────────────────────────────────────
     class Room {
         constructor(id, mode = 'casual') {
@@ -1446,6 +1491,12 @@
             ];
             this._infAiTick  = 0;   // counts ticks for 5 Hz AI throttle
             this._infAiDidUpdate = false; // set true when AI runs; consumed by broadcastSnapshot
+
+            // ── Spatial hash grids — rebuilt each tick, used for all proximity queries ──
+            this._playerHash  = new SpatialHash(80);
+            this._buildHash   = new SpatialHash(80);
+            this._infHash     = new SpatialHash(80);
+            this._vehicleHash = new SpatialHash(80);
 
             this.rankSum   = 0;   // sum of all player ranks in this room
             this.rankCount = 0;   // number of players (for avg rank calculation)
@@ -1811,15 +1862,15 @@
             if (op.faction !== faction) return;   // cross-faction guard
 
             player.operatorId = opId;
-            // Auto-select first allowed weapon when operator changes
-            if (player.weaponId === null || !op.allowedWeapons.includes(player.weaponId)) {
-                player.weaponId = op.allowedWeapons[0] || null;
+            // Clear weapon if it's no longer valid for the newly selected operator.
+            // Do NOT auto-select — the player must choose explicitly.
+            // A fallback is applied at game-start (startGame) if they never pick one.
+            if (player.weaponId !== null && !op.allowedWeapons.includes(player.weaponId)) {
+                player.weaponId = null;
             }
-            // Confirm selection back to this player only
+            // Echo operator confirmation without a pre-selected weapon
             if (player.ws.readyState === WebSocket.OPEN) {
-                player.ws.send(JSON.stringify({
-                    t: 'op_confirmed', opId, weaponId: player.weaponId,
-                }));
+                player.ws.send(JSON.stringify({ t: 'op_confirmed', opId }));
             }
         }
 
@@ -2134,9 +2185,12 @@
                 p.vehicleId   = null;
                 p.vehicleRole = null;
                 // ── Apply weapon loadout ──────────────────────────────────────
-                // fireRate and projSpd are now driven by the player's selected weapon.
-                // If no weapon was selected (shouldn't happen after _finalizeOperatorSelect),
-                // fall back to the base values so gameplay never breaks.
+                // If the player never explicitly chose a weapon (e.g. timer expired),
+                // fall back to the first weapon allowed by their operator.
+                if (!p.weaponId && p.operatorId) {
+                    const _op = OPERATOR_DEFS[p.operatorId];
+                    p.weaponId = _op?.allowedWeapons[0] || null;
+                }
                 const weapDef = WEAPON_DEFS[p.weaponId];
                 p._weaponFireRate = weapDef ? weapDef.fireRate  : 200;   // ms between shots
                 p._weaponProjSpd  = weapDef ? weapDef.projSpd   : 700;
@@ -2144,6 +2198,8 @@
                 p._weaponProjR    = weapDef ? weapDef.projR      : 5;
                 p._weaponSpread   = weapDef ? weapDef.spread     : 0.04;
                 p._weaponPellets  = weapDef ? (weapDef.pellets   || 1) : 1;  // shotgun pellet count
+                // Apply weapon movement speed penalty/bonus
+                p.spd = Math.round(250 * (weapDef ? (weapDef.moveSpeedMult || 1.0) : 1.0));
                 // ── Reset ability state ───────────────────────────────────────
                 p.activeAbility   = null;
                 p.abilityCooldown = 0;
@@ -2202,6 +2258,17 @@
             this.tickCount++;
 
             if (this.phase === PH.END) return;
+
+            // ── Rebuild spatial hash grids for this tick ───────────────────────────
+            this._playerHash.clear();
+            for (const p of this.players.values())
+                if (p.rt <= 0) this._playerHash.insert(p.x, p.y, p);
+            this._buildHash.clear();
+            for (const b of this.buildings.values())
+                this._buildHash.insert(b.x, b.y, b);
+            this._vehicleHash.clear();
+            for (const v of this.vehicles.values())
+                this._vehicleHash.insert(v.x, v.y, v);
 
             for (const player of this.players.values()) {
                 if (player.rt > 0) {
@@ -2755,7 +2822,7 @@
                 }
 
                 if (!dead && this.phase === PH.ATTACK) {
-                    for (const target of this.players.values()) {
+                    for (const target of this._playerHash.query(p.x, p.y, 80)) {
                         if (dead) break;
                         if (target.rt > 0 || target.team === p.team) continue;
                         if (segCircle(prevX, prevY, p.x, p.y, target.x, target.y, target.r + p.r)) {
@@ -2786,7 +2853,7 @@
                     }
 
                     if (!dead) {
-                        for (const [bid, b] of this.buildings) {
+                        for (const b of this._buildHash.query(p.x, p.y, 90)) {
                             if (b.team === p.team) continue;
                             const hit =
                                 (b.type === 'w'  && segRect(prevX, prevY, p.x, p.y, p.r, b.x-WALL_HALF, b.y-WALL_HALF, WALL_W, WALL_W)) ||
@@ -2828,10 +2895,10 @@
                                     }
                                 }
                                 if (b.hp <= 0) {
-                                    this.buildings.delete(bid);
-                                    this.events.push({ e: EV.BUILD_DESTROY, i: bid });
+                                    this.buildings.delete(b.id);
+                                    this.events.push({ e: EV.BUILD_DESTROY, i: b.id });
                                 } else {
-                                    this.events.push({ e: EV.BUILD_HIT, i: bid, hp: b.hp });
+                                    this.events.push({ e: EV.BUILD_HIT, i: b.id, hp: b.hp });
                                 }
                                 break;
                             }
@@ -2839,7 +2906,7 @@
                     }
 
                     if (!dead) {
-                        for (const [vid, v] of this.vehicles) {
+                        for (const v of this._vehicleHash.query(p.x, p.y, 120)) {
                             if (v.team === p.team) continue;
                             if (segCircle(prevX, prevY, p.x, p.y, v.x, v.y, v.r + p.r)) {
                                 const vDef2 = VEHICLE_DEFS[v.type] || {};
@@ -2870,8 +2937,8 @@
                                         }
                                         v.infantryIds = [];
                                     }
-                                    this.vehicles.delete(vid);
-                                    this.events.push({ e: EV.VEHICLE_DESTROY, id: vid });
+                                    this.vehicles.delete(v.id);
+                                    this.events.push({ e: EV.VEHICLE_DESTROY, id: v.id });
                                 }
                                 break;
                             }
@@ -3317,13 +3384,13 @@
 
         findClosestEnemy(x, y, team, maxRange) {
             let closest = null, minD = maxRange;
-            for (const p of this.players.values()) {
+            for (const p of this._playerHash.query(x, y, maxRange)) {
                 if (p.team === team || p.rt > 0) continue;
                 const d = dist(x, y, p.x, p.y);
                 if (d < minD) { minD = d; closest = p; }
             }
             // Also consider enemy infantry as valid turret targets
-            for (const inf of this.infantry.values()) {
+            for (const inf of this._infHash.query(x, y, maxRange)) {
                 if (inf.team === team || inf.state === 'in_apc') continue;
                 const d = dist(x, y, inf.x, inf.y);
                 if (d < minD) { minD = d; closest = { x: inf.x, y: inf.y, hp: inf.hp, id: inf.id, r: inf.r, _isInfantry: true }; }
@@ -3331,24 +3398,25 @@
             return closest;
         }
 
-        // ── Infantry AI target finder — players, turrets, walls, vehicles, core ───
+        // ── Infantry AI target finder — players, turrets, vehicles, core ───────────
+        // Uses spatial hash grids for O(k) lookup instead of O(N) full scans.
         findClosestEnemyForInfantry(x, y, team, maxRange) {
             let target = null, minD = maxRange;
             // Enemy players
-            for (const p of this.players.values()) {
+            for (const p of this._playerHash.query(x, y, maxRange)) {
                 if (p.team === team || p.rt > 0) continue;
                 const d = dist(x, y, p.x, p.y);
                 if (d < minD) { minD = d; target = { x: p.x, y: p.y }; }
             }
             // Enemy buildings (turrets, depots, barracks)
-            for (const b of this.buildings.values()) {
+            for (const b of this._buildHash.query(x, y, maxRange)) {
                 if (b.team === team) continue;
                 if (b.type !== 't' && b.type !== 'vd' && b.type !== 'bk') continue;
                 const d = dist(x, y, b.x, b.y);
                 if (d < minD) { minD = d; target = { x: b.x, y: b.y }; }
             }
             // Enemy vehicles
-            for (const v of this.vehicles.values()) {
+            for (const v of this._vehicleHash.query(x, y, maxRange)) {
                 if (v.team === team) continue;
                 const d = dist(x, y, v.x, v.y);
                 if (d < minD) { minD = d; target = { x: v.x, y: v.y }; }
@@ -3498,6 +3566,11 @@
             // infantry updates to 5 Hz instead of 10 Hz.
             this._infAiDidUpdate = true;
 
+            // Rebuild infantry hash for O(N) separation (replaces O(N²) full scan)
+            this._infHash.clear();
+            for (const inf of this.infantry.values())
+                if (inf.state !== 'in_apc') this._infHash.insert(inf.x, inf.y, inf);
+
             for (const [iid, inf] of this.infantry) {
                 if (inf.state === 'in_apc') continue;
 
@@ -3602,9 +3675,10 @@
                 }
 
                 // Avoid nearby infantry (same team) — mild separation
+                // Uses spatial hash: O(k) per unit instead of O(N) scan → O(N) total
                 const AVOID_R = 20;
-                for (const [oid, other] of this.infantry) {
-                    if (oid === iid || other.state === 'in_apc') continue;
+                for (const other of this._infHash.query(inf.x, inf.y, AVOID_R)) {
+                    if (other === inf || other.state === 'in_apc') continue;
                     const od = dist(inf.x, inf.y, other.x, other.y);
                     if (od < AVOID_R && od > 0) {
                         const push = (AVOID_R - od) * 0.35;
@@ -3613,8 +3687,8 @@
                     }
                 }
 
-                // Avoid walls — soft repulsion
-                for (const b of this.buildings.values()) {
+                // Avoid walls — soft repulsion (hash query: O(k) per unit)
+                for (const b of this._buildHash.query(inf.x, inf.y, 40)) {
                     if (b.type !== 'w') continue;
                     const bd = dist(inf.x, inf.y, b.x, b.y);
                     if (bd < 28 && bd > 0) {
@@ -3634,7 +3708,7 @@
                 if (this.isOnWater(nx, inf.y, inf.r)) nx = inf.x;
                 if (this.isOnWater(inf.x, ny, inf.r)) ny = inf.y;
 
-                for (const b of this.buildings.values()) {
+                for (const b of this._buildHash.query(inf.x, inf.y, 40)) {
                     if (b.type === 'w') {
                         const rx = b.x - WALL_HALF, ry = b.y - WALL_HALF;
                         if (circleRect(nx, inf.y, inf.r, rx, ry, WALL_W, WALL_W)) nx = inf.x;
@@ -3680,7 +3754,7 @@
                                   : this.teamFactions[player.team] === 'bgm' ? 'bgm_bur3'
                                   : this.teamFactions[player.team] === 'epa' ? 'epa_guardian'
                                   : 'grunt',
-                    lastProduction: now - INF_PROD_INTERVAL, // ready immediately
+                    lastProduction: now, // first spawn after 4s delay
                     apcCooldown   : 0,
                 };
                 this.buildings.set(id, b);
@@ -3996,7 +4070,7 @@
         }
 
         applySplash(cx, cy, radius, attackingTeam, dmg) {
-            for (const target of this.players.values()) {
+            for (const target of this._playerHash.query(cx, cy, radius + 20)) {
                 if (target.rt > 0 || target.team === attackingTeam) continue;
                 if (dist(cx, cy, target.x, target.y) >= radius + target.r) continue;
                 target.hp -= dmg;
@@ -4008,7 +4082,7 @@
                 }
             }
             const toDelete = [];
-            for (const [bid, b] of this.buildings) {
+            for (const b of this._buildHash.query(cx, cy, radius + 30)) {
                 if (b.team === attackingTeam) continue;
                 const hit = b.type === 'w'
                     ? circleRect(cx, cy, radius, b.x - WALL_HALF, b.y - WALL_HALF, WALL_W, WALL_W)
@@ -4017,10 +4091,10 @@
                 const resist = (b.type === 'w' && b.exploResist !== undefined) ? b.exploResist : 1.0;
                 b.hp -= Math.round(dmg * resist);
                 if (b.hp <= 0) {
-                    toDelete.push(bid);
-                    this.events.push({ e: EV.BUILD_DESTROY, i: bid });
+                    toDelete.push(b.id);
+                    this.events.push({ e: EV.BUILD_DESTROY, i: b.id });
                 } else {
-                    this.events.push({ e: EV.BUILD_HIT, i: bid, hp: b.hp });
+                    this.events.push({ e: EV.BUILD_HIT, i: b.id, hp: b.hp });
                 }
             }
             for (const bid of toDelete) this.buildings.delete(bid);
